@@ -1,0 +1,11 @@
+# pinact configuration: every GitHub Action reference must be pinned to a 40-char SHA.
+# Run `pinact run` to refresh after bumping a tag.
+
+version: 3
+
+files:
+  - path: .github/workflows/*.yml
+
+ignore:
+  # Do not require pinning for these orgs/owners (none today).
+  ignore_actions: []

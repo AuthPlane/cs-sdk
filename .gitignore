@@ -1,0 +1,18 @@
+# Build / IDE
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Test / coverage artifacts
+TestResults/
+coverage/
+
+# Coverlet outputs
+*.cobertura.xml
+*.lcov
+*.lcov.info
+coverage*.xml
+coverage*.json
+

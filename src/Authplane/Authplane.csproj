@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>Authplane.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Authplane Team</Authors>
+    <Description>Authplane SDK for .NET — OAuth 2.1 JWT validation and token operations for protected resources.</Description>
+    <PackageTags>oauth;jwt;security;mcp;authplane</PackageTags>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <RepositoryUrl>https://github.com/AuthPlane/cs-sdk.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageProjectUrl>https://github.com/AuthPlane/cs-sdk/tree/develop/src/Authplane</PackageProjectUrl>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <Title>Authplane SDK for .NET</Title>
+    <Copyright>Copyright © Authplane Team</Copyright>
+    <PackageReleaseNotes>https://github.com/AuthPlane/cs-sdk/blob/develop/CHANGELOG.md</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- Shared brand isotype at the repo root, packed into every publishable
+         package so nuget.org renders the Authplane mark instead of the default
+         placeholder. Kept as a single source of truth rather than a per-project
+         copy. -->
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.5.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Internals exposed to the test project only — locks contracts on
+         internal types (MetadataCache, MetadataDocument) that share critical
+         concurrency patterns with their public counterparts. Not shipped to
+         downstream consumers. -->
+    <InternalsVisibleTo Include="Authplane.Tests" />
+  </ItemGroup>
+
+</Project>
+

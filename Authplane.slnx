@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/demo/">
+    <Project Path="demo/Authplane.Mcp.Demo.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Authplane.Mcp/Authplane.Mcp.csproj" />
+    <Project Path="src/Authplane/Authplane.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Authplane.Conformance.Shared/Authplane.Conformance.Shared.csproj" />
+    <Project Path="tests/Authplane.Mcp.Tests/Authplane.Mcp.Tests.csproj" />
+    <Project Path="tests/Authplane.Tests/Authplane.Tests.csproj" />
+  </Folder>
+</Solution>

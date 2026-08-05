@@ -1,0 +1,161 @@
+name: Publish to NuGet
+
+# Tag-triggered publish. The two NuGet packages (`Authplane.Sdk`,
+# `Authplane.Mcp`) go to nuget.org from this workflow; `release.yml`
+# only pushes the tag and lets this workflow take over.
+#
+# Runs on any `v*.*.*` tag regardless of which branch tip it pointed to
+# (release/v* for current-line releases, hotfix/v* for old-minor patches —
+# both branches are deleted post-tag, but the tag commit itself remains).
+# The tag is the authority — gating is via the `nuget` GitHub environment's
+# tag policy, the strongest binding NuGet currently supports for trusted
+# publishing.
+#
+# Multi-package order: `Authplane.Sdk` (core) publishes first because
+# `Authplane.Mcp` references it. The workflow is tag-triggered only (no
+# workflow_dispatch), so recovery from a partial publish is the GitHub UI's
+# "Re-run failed jobs" — that re-builds and re-packs from the tag, then
+# re-pushes both packages with --skip-duplicate, which makes the re-push
+# of the already-landed package a no-op and recovers the failed one.
+# The packed artifacts are uploaded for audit and as an escape hatch for
+# the rare case where the gated push must be replayed manually (running
+# `dotnet nuget push` outside the workflow bypasses the `nuget`
+# environment's tag-only deployment policy, so prefer the UI rerun).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: publish-nuget-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: nuget
+      # Multi-package publish — the deploy banner needs to surface both
+      # Authplane.Sdk and Authplane.Mcp. NuGet has no per-org landing
+      # page that lists both, so point at the search URL that filters to
+      # the Authplane prefix (catches both packages and any future siblings).
+      url: https://www.nuget.org/packages?q=Authplane
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          # 8.0.x alongside 10.0.x so the net8.0 target builds against
+          # installed reference packs instead of an implicit NuGet download
+          # of Microsoft.NETCore.App.Ref at release time.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag ${tag} is not a semantic v<X.Y.Z> version. Refusing to publish."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify csproj version matches tag
+        # The release commit on the release/hotfix branch bumped the .csproj
+        # files to the final X.Y.Z before tagging. Sanity-check that the
+        # checked-out tag really has that version before any push.
+        run: |
+          expected="${{ steps.version.outputs.version }}"
+          for csproj in src/Authplane/Authplane.csproj src/Authplane.Mcp/Authplane.Mcp.csproj; do
+            actual=$(sed -n 's/.*<Version>\([^<]*\)<\/Version>.*/\1/p' "$csproj" | head -1)
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::${csproj} <Version>${actual}</Version> does not match tag version ${expected}. Refusing to publish."
+              exit 1
+            fi
+          done
+
+      - name: Restore + build solution
+        run: |
+          dotnet restore Authplane.slnx
+          dotnet build Authplane.slnx --configuration Release --no-restore
+
+      - name: Pack
+        # The two publishable projects (src/Authplane, src/Authplane.Mcp) emit
+        # .nupkg into ./nupkg/. Non-packable projects are skipped: demo
+        # carries IsPackable=false, and the test + conformance projects
+        # carry IsPackable=false.
+        #
+        # Symbol packages: Directory.Build.props sets IncludeSymbols=true
+        # and SymbolPackageFormat=snupkg, so pack emits a .snupkg alongside
+        # each .nupkg. The push step needs no special handling — `dotnet
+        # nuget push Foo.nupkg` automatically pushes an adjacent
+        # `Foo.snupkg` when present (and silently skips it otherwise).
+        run: |
+          dotnet pack Authplane.slnx \
+            --configuration Release \
+            --no-build \
+            --output ./nupkg
+
+      - name: Upload packed artifacts
+        # 30-day retention so the exact packed bits that publish-nuget
+        # produced for this tag are recoverable for audit / forensic
+        # comparison and as an escape hatch for the manual-replay case
+        # described in the workflow header. The primary recovery path for
+        # a partial publish is the GitHub UI's "Re-run failed jobs" — that
+        # re-builds and re-pushes with --skip-duplicate, keeping the run
+        # inside the `nuget` environment gate. `overwrite: true` is load-
+        # bearing for that recovery story: upload-artifact@v4 defaults to
+        # `overwrite: false` and rejects a re-upload of an existing artifact
+        # name, which would abort the re-run before the push steps ever
+        # ran and bypass --skip-duplicate entirely.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nupkg-${{ steps.version.outputs.version }}
+          path: ./nupkg/
+          retention-days: 30
+          overwrite: true
+
+      - name: Push Authplane.Sdk first
+        # Push the core package before the adapter so consumers resolving
+        # the adapter dependency see the matching core version already on
+        # the feed. NuGet's eventual-consistency means there's a window
+        # where the index has not yet seen the new version even after the
+        # push returns — `--skip-duplicate` allows safe retries.
+        # `dotnet nuget push Foo.nupkg` automatically pushes the adjacent
+        # Foo.snupkg when present, so a single push per package covers both
+        # the assembly and its symbol package.
+        run: |
+          dotnet nuget push "./nupkg/Authplane.Sdk.${{ steps.version.outputs.version }}.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --skip-duplicate
+
+      - name: Push Authplane.Mcp
+        run: |
+          dotnet nuget push "./nupkg/Authplane.Mcp.${{ steps.version.outputs.version }}.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --skip-duplicate
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### NuGet publish"
+            echo ""
+            echo "- **Tag**: \`${{ steps.version.outputs.tag }}\`"
+            echo "- **Version**: \`${{ steps.version.outputs.version }}\`"
+            echo "- **Authplane.Sdk**: https://www.nuget.org/packages/Authplane.Sdk/${{ steps.version.outputs.version }}"
+            echo "- **Authplane.Mcp**: https://www.nuget.org/packages/Authplane.Mcp/${{ steps.version.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"

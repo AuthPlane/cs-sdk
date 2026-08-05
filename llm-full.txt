@@ -1,0 +1,176 @@
+# Authplane .NET SDK — Complete LLM Reference
+
+> Single `.slnx` for protecting MCP servers and OAuth 2.1 resource servers
+> with tokens issued by an Authplane authorization server. Contains the
+> framework-agnostic SDK (`src/Authplane/`) and a framework adapter for the
+> official MCP .NET SDK's ASP.NET Core transport (`src/Authplane.Mcp/`).
+
+## When To Use This Repository
+
+Use this repo when you need to:
+- implement or adjust .NET OAuth 2.1 discovery, metadata, JWKS, verification,
+  or DPoP behavior
+- evolve the stateful auth client (cache, circuit breaker, resilience)
+- wire the verifier into ASP.NET Core / the MCP .NET SDK HTTP transport
+  (`src/Authplane.Mcp/`)
+- adjust adapter-level middleware / DI / challenge behavior and the demo host
+
+## Repository Structure
+
+| Path | Purpose |
+|---|---|
+| `Authplane.slnx` | unified solution |
+| `Directory.Build.props` | repo-wide MSBuild defaults (analyzers, warnings-as-errors) |
+| `global.json` | pinned .NET SDK version |
+| `.editorconfig` | repo-wide formatting rules |
+| `.pinact.yaml` | SHA-pinning policy for GitHub Actions |
+| `coverlet.runsettings` | shared coverage configuration |
+| `src/Authplane/` | core SDK — NuGet `Authplane.Sdk` |
+| `src/Authplane/OAuth/OAuthOperations.cs` | stateless protocol operations facade |
+| `src/Authplane/OAuth/AuthplaneAuthClient.cs` | stateful orchestration (incl. revocation) |
+| `src/Authplane/OAuth/Internal/` | HTTP plumbing, body building, response parsing |
+| `src/Authplane/OAuth/IAuthProvider.cs` | pluggable auth header provider interface + `ClientCredentialsProvider` |
+| `src/Authplane/OAuth/OAuthConstants.cs` | well-known grant types, token type URNs |
+| `src/Authplane/Verifier/` | `AuthplaneResource`, `JwksCache`, `IRevocationChecker`, `IntrospectionRevocation` |
+| `src/Authplane/Net/` | `FetchSettings`, SSRF primitives (`IpValidation`, `Ssrf`, `TransportSecurity` with DNS-pinning `ConnectCallback`) |
+| `src/Authplane/DPoP/` | `ES256DpoPSigner`, `DPoPProvider` (high-level with nonce tracking), `DPoPKeyMaterial` (ES256+RS256), replay/nonce stores, `DPoPHtu` normalization |
+| `src/Authplane/Internal/` | `CacheHeaders` (RFC 7234 parsing), `JwksFetchResult` |
+| `src/Authplane/Resilience/` | circuit breaker |
+| `src/Authplane/Metadata/` | RFC 9728 PRM types |
+| `src/Authplane/Errors.cs` | full typed error taxonomy — `DPoPException` base, `TokenRevokedException`, `ProtocolException`, typed OAuth error subclasses, `AuthplaneErrors.WwwAuthenticate()` / `HttpStatus()` helpers |
+| `src/Authplane.Mcp/` | MCP adapter — NuGet `Authplane.Mcp` |
+| `tests/Authplane.Tests/` | core SDK unit tests |
+| `tests/Authplane.Mcp.Tests/` | MCP adapter unit / integration tests |
+| `tests/Authplane.Conformance.Shared/` | shared conformance plumbing + `[Conformance]` attribute |
+| `demo/` | self-contained MCP demo host |
+| `scripts/` | manual E2E setup + smoke scripts |
+
+## Layering Rules (Important)
+
+1. All protocol verification, AS interaction, caching, and resilience logic
+   lives in `src/Authplane/`.
+2. The MCP adapter (`src/Authplane.Mcp/`) must stay thin: translate ASP.NET
+   request contexts into core verifier calls and map core exceptions into
+   framework-specific responses.
+3. Do not duplicate verifier or token-parsing logic in the adapter.
+4. Keep protocol operations stateless; keep cache / circuit / client state
+   in the high-level client classes.
+5. Each project has its own `<PackageId>` and is independently packable via
+   `dotnet pack`. `Authplane.Mcp` declares `Authplane.Sdk` as a NuGet
+   dependency through its ProjectReference.
+
+## Key Design Patterns
+
+### Error hierarchy
+`AuthplaneException` is the root. Typed subclasses for each RFC error code
+(`InvalidClientException`, `InvalidGrantException`, etc.), a `DPoPException`
+base for all DPoP errors, `TokenRevokedException` for revocation. The
+`AuthplaneErrors` static class provides `WwwAuthenticate(error, realm)` and
+`HttpStatus(error)` helpers mapping exceptions to RFC 6750 challenges and
+HTTP status codes.
+
+### SSRF protection
+`TransportSecurity.CreateHttpClient()` uses `SocketsHttpHandler.ConnectCallback`
+for DNS-pinning: resolve hostname → validate all IPs via `IpValidation.IsAllowed`
+→ connect to validated IP directly. Closes TOCTOU/DNS-rebind. Iterates IPs on
+connect failure (python parity). Positive scheme allowlist (http/https only),
+TLS 1.2+ minimum, userinfo rejection on all URLs.
+
+### JWKS caching
+`JwksCache` provides: lock-coordinated fetches (no stampede), background refresh
+at 80% of effective TTL, effective TTL = min(configured, server Cache-Control/Expires
+via `CacheHeaders.ParseExpiresAt`), stale fallback capped at 24h max-age,
+force-refresh on kid miss, error callback for observability.
+
+### DPoP (outbound)
+Two levels: `ES256DpoPSigner` (low-level, ES256 only) and `DPoPProvider`
+(high-level, ES256+RS256 via `DPoPKeyMaterial`, automatic nonce tracking via
+`IDPoPNonceStore`). Both normalize htu via `DPoPHtu.Normalize()`.
+
+### DPoP (inbound verification)
+`AuthplaneResource.VerifyAsync` checks `cnf.jkt` in the access token, validates
+DPoP proof (alg allowlist, typ, htm, htu, iat, exp, ath required when access
+token present, nonce, replay store with shared instance lifetime).
+
+### Conformance testing
+Tests use `[Conformance("rfc...-case-id")]` attributes. A guard test
+(`ConformanceCatalogAlignmentTests`) ensures every catalog case has a marker.
+
+## Quick Start
+
+```bash
+cd cs-sdk
+dotnet build
+dotnet test --settings coverlet.runsettings
+```
+
+## API Examples
+
+### 1) Client credentials flow (core)
+
+```csharp
+var auth = new AuthplaneAuthClient(
+    issuerUrl: "https://auth.example.com",
+    clientId: "client-id",
+    clientSecret: "client-secret");
+
+var token = await auth.ClientCredentialsAsync("tools/read");
+```
+
+### 2) RFC 8693 token exchange (core)
+
+```csharp
+var exchanged = await auth.TokenExchangeAsync(
+    new TokenExchangeOptions("subject-token", resource: "https://api.example.com"));
+```
+
+### 3) DPoP with DPoPProvider (high-level)
+
+```csharp
+var keyMaterial = DPoPKeyMaterial.CreateES256();
+var dpopProvider = new DPoPProvider(keyMaterial);
+var headers = await dpopProvider.BuildHeadersAsync("POST", "https://as.example.com/oauth/token");
+```
+
+### 4) MCP adapter (`src/Authplane.Mcp/`)
+
+```csharp
+// See src/Authplane.Mcp/ and demo/ for the full ASP.NET Core wiring.
+```
+
+## Practical Example Locations
+
+| Example Type | Location |
+|---|---|
+| SDK usage snippets | `README.md` |
+| MCP adapter wiring | `src/Authplane.Mcp/` |
+| Self-contained demo host | `demo/` |
+
+## Validation Commands
+
+- `dotnet build`
+- `dotnet test --settings coverlet.runsettings`
+- `dotnet pack` (produces `Authplane.Sdk.*.nupkg` and `Authplane.Mcp.*.nupkg`)
+
+## Typical AI-Agent Tasks
+
+- adjust resilience / error mapping behavior
+- extend token operation wrappers while preserving API compatibility
+- add tests for retry / circuit / nonce / auth error paths
+- improve middleware challenge / error responses in the adapter
+- keep README and demo instructions aligned with the current API
+
+## Guardrails
+
+- preserve nullability and exception semantics
+- keep public API changes deliberate and documented
+- all verifier / protocol code stays in `src/Authplane/`; the adapter is thin
+- add tests for every behavior change
+- preserve framework expectations for status codes and headers in the adapter
+- use `[Conformance("rfc...-case-id")]` on tests verifying RFC behaviors
+
+## References
+
+- Authplane authorization server: https://github.com/AuthPlane/authserver
+- Conformance catalog: https://github.com/AuthPlane/conformance
+- License: Apache-2.0 (`LICENSE`)

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # AuthPlane/conformance is the public repo carrying the shared
+      # oauth-sdk-conformance-catalog.yaml. Cloned to $RUNNER_TEMP — outside
+      # $GITHUB_WORKSPACE — so the catalog stays out of the working tree
+      # (keeps the catalog out of coverage globs and dotnet's source
+      # discovery). Plain git clone is
+      # enough: the repo is public read-only, no auth or persist-credentials
+      # features needed.
+      - name: Clone shared conformance catalog (out of tree)
+        run: |
+          git clone --depth 1 https://github.com/AuthPlane/conformance.git "$RUNNER_TEMP/conformance"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          # 8.0.x runtime alongside the 10.0.x SDK so `dotnet test` executes
+          # the net8.0 target of the multi-targeted test projects, not just
+          # compiles it.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Authplane.slnx
+
+      - name: Format check
+        run: dotnet format Authplane.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build Authplane.slnx --configuration Release --no-restore
+
+      - name: Run core tests + coverage thresholds
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: >
+          dotnet test tests/Authplane.Tests/Authplane.Tests.csproj
+          --configuration Release
+          --no-build
+          /p:CollectCoverage=true
+          /p:CoverletOutputFormat=cobertura
+          /p:ThresholdType=line%2cbranch
+          /p:Threshold=80%2c70
+          /p:ThresholdStat=total
+
+      - name: Run MCP adapter tests + coverage thresholds
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: >
+          dotnet test tests/Authplane.Mcp.Tests/Authplane.Mcp.Tests.csproj
+          --configuration Release
+          --no-build
+          /p:CollectCoverage=true
+          /p:CoverletOutputFormat=cobertura
+          /p:ThresholdType=line%2cbranch
+          /p:Threshold=80%2c70
+          /p:ThresholdStat=total
+
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-report
+          # Both TFMs run under test and each produces its own report.
+          path: |
+            tests/Authplane.Tests/bin/Release/*/conformance-report.json
+            tests/Authplane.Tests/bin/Release/*/conformance-report.md
+            tests/Authplane.Mcp.Tests/bin/Release/*/conformance-report.json
+            tests/Authplane.Mcp.Tests/bin/Release/*/conformance-report.md
+          if-no-files-found: ignore
+
+      - name: Pack NuGet packages
+        run: |
+          dotnet pack src/Authplane/Authplane.csproj --configuration Release --no-build
+          dotnet pack src/Authplane.Mcp/Authplane.Mcp.csproj --configuration Release --no-build

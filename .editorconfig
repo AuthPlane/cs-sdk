@@ -1,0 +1,58 @@
+# EditorConfig — https://editorconfig.org
+# Top-level so the rules apply to every file in the repo.
+root = true
+
+# Defaults
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Web-tooling defaults
+[*.{json,yml,yaml,md,html,css,js,ts}]
+indent_size = 2
+
+# Shell scripts
+[*.sh]
+indent_size = 2
+
+# C# rules — kept conservative; raise once `dotnet format --verify-no-changes` is green.
+[*.cs]
+indent_size = 4
+
+# Use file-scoped namespaces (matches existing code).
+csharp_style_namespace_declarations = file_scoped:warning
+
+# Modern C# preferences.
+csharp_prefer_braces = true:warning
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+csharp_style_expression_bodied_methods = false:none
+csharp_style_pattern_matching_over_is_with_cast_check = true:warning
+csharp_style_pattern_matching_over_as_with_null_check = true:warning
+csharp_style_inlined_variable_declaration = true:warning
+
+# Nullable annotations are enforced via project settings; analyzers fail on warning.
+dotnet_diagnostic.CS8600.severity = error
+dotnet_diagnostic.CS8601.severity = error
+dotnet_diagnostic.CS8602.severity = error
+dotnet_diagnostic.CS8603.severity = error
+dotnet_diagnostic.CS8625.severity = error
+
+# Flag unused `using` directives as warnings. The repo runs with
+# TreatWarningsAsErrors=true, so dead usings now fail the build instead of
+# accumulating silently behind successful CI runs — past refactors had left
+# `System.*` imports behind in DPoP signer / verifier files for weeks.
+# Default IDE0005 is "silent" and `dotnet format` skips it; this opt-in is
+# the lever that turns it on.
+dotnet_diagnostic.IDE0005.severity = warning
+# IDE0005 only runs when GenerateDocumentationFile is true; the
+# Directory.Build.props level already pins that on for src/ projects.
+
+# Project / solution files — keep XML formatting predictable.
+[*.{csproj,props,targets,slnx}]
+indent_size = 2

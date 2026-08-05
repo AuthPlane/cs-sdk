@@ -1,0 +1,70 @@
+name: Security Audit
+
+# Runs `dotnet list package --vulnerable` against the solution to surface
+# any packages with known CVEs reported by the NuGet vulnerability feed.
+# Fails the build when any vulnerability is found at "High" or "Critical"
+# severity. Lower severities are reported but don't block.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.csproj"
+      - "**/Directory.Build.props"
+      - "**/Directory.Packages.props"
+      - "**/packages.lock.json"
+      - ".github/workflows/security.yml"
+  push:
+    branches:
+      - develop
+    paths:
+      - "**/*.csproj"
+      - "**/Directory.Build.props"
+      - "**/Directory.Packages.props"
+      - "**/packages.lock.json"
+      - ".github/workflows/security.yml"
+  schedule:
+    # Mondays 06:00 UTC — after dependabot runs.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vulnerable-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore solution
+        run: dotnet restore Authplane.slnx
+
+      - name: Audit dependencies for known vulnerabilities
+        # `dotnet list package --vulnerable --include-transitive` lists every
+        # package (direct + transitive) with a known CVE per NuGet's feed.
+        # We `tee` the output so the upload-artifact step can capture it,
+        # then `grep` for "High" or "Critical" — if any line matches, the
+        # build fails.
+        run: |
+          set -o pipefail
+          dotnet list Authplane.slnx package --vulnerable --include-transitive \
+            | tee vulnerable-packages.txt
+          if grep -E "(High|Critical)" vulnerable-packages.txt; then
+            echo "::error::High or Critical vulnerabilities detected in dependencies."
+            exit 1
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vulnerable-packages-report
+          path: vulnerable-packages.txt
+          if-no-files-found: warn
+          retention-days: 14

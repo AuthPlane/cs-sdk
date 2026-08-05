@@ -1,0 +1,95 @@
+# Authplane .NET SDK — LLM Guide
+
+Short guide. For complete context and detailed examples, read `llm-full.txt`.
+
+## What this repo provides
+
+A single `.slnx` containing the framework-agnostic Authplane SDK and a
+framework adapter for protecting MCP servers and OAuth 2.1 resource servers
+with tokens issued by an Authplane authorization server.
+
+Projects (published as separate NuGet packages):
+
+- `src/Authplane/` — `Authplane.Sdk` — framework-agnostic JWT validation,
+  JWKS caching (with RFC 7234 cache header support), DPoP (inbound + outbound
+  via ES256DpoPSigner or the higher-level DPoPProvider), introspection,
+  RFC 7009 revocation, RFC 8693 token exchange, RFC 9728 PRM, SSRF protection
+  with DNS-pinning, and a stateful auth client with resilience (cache /
+  circuit breaker).
+- `src/Authplane.Mcp/` — `Authplane.Mcp` — thin adapter that wires the core
+  SDK into the official MCP .NET SDK's ASP.NET Core HTTP transport.
+
+## First files to read
+
+- `README.md` (root) — overview and layout
+- `Authplane.slnx` — unified solution
+- `coverlet.runsettings` — shared coverage configuration
+- `src/Authplane/` — public API, organised by concern:
+  - `OAuth/` — `AuthplaneAuthClient`, `OAuthOperations`, `IAuthProvider`,
+    `ClientCredentialsProvider`, `OAuthConstants`, request/response types
+  - `OAuth/Internal/` — HTTP plumbing, body building, response parsing
+  - `Verifier/` — `AuthplaneResource`, `VerifiedClaims`, `JwksCache`,
+    `IRevocationChecker`, `IntrospectionRevocation`
+  - `Net/` — `FetchSettings`, `Jwks`/`MetadataFetchSettings`, SSRF primitives
+    (`IpValidation`, `Ssrf`, `TransportSecurity` with DNS-pinning ConnectCallback)
+  - `DPoP/` — `ES256DpoPSigner`, `DPoPProvider`, `DPoPKeyMaterial`,
+    replay store, nonce store, request context, `DPoPHtu` normalization
+  - `Internal/` — `CacheHeaders` (RFC 7234), `JwksFetchResult`
+  - `Resilience/` — circuit breaker
+  - `Metadata/` — RFC 9728 PRM types
+  - root: `AuthplaneClient.cs`, `Errors.cs` (full typed error taxonomy with
+    `AuthplaneErrors.WwwAuthenticate()` / `HttpStatus()` helpers)
+- `src/Authplane.Mcp/` — MCP adapter
+- `tests/Authplane.Tests/`, `tests/Authplane.Mcp.Tests/`,
+  `tests/Authplane.Conformance.Shared/` — includes `[Conformance("rfc...")]`
+  attribute-based conformance testing framework
+- `demo/` — self-contained MCP demo host
+- `scripts/` — manual E2E setup and smoke scripts
+
+## Architecture rules
+
+- All protocol verification, AS interaction, caching, and resilience logic
+  lives in `src/Authplane/`.
+- The MCP adapter (`src/Authplane.Mcp/`) must stay thin: translate ASP.NET
+  request contexts into core verifier calls, translate core exceptions into
+  framework-specific responses.
+- Do not duplicate verifier or token-parsing logic in the adapter.
+- Keep protocol operations stateless; keep cache / circuit / client state
+  in the high-level client classes.
+- Nullability and exception semantics stay consistent with `.editorconfig`
+  and analyzers.
+
+## Minimal usage example
+
+```csharp
+// core
+var auth = new AuthplaneAuthClient(
+    issuerUrl: "https://auth.example.com",
+    clientId: "client-id",
+    clientSecret: "client-secret");
+var token = await auth.ClientCredentialsAsync("tools/read");
+```
+
+See `src/Authplane.Mcp/` and `demo/` for framework-specific wiring.
+
+## Validation commands
+
+- Build: `dotnet build`
+- Tests: `dotnet test --settings coverlet.runsettings`
+- Pack: `dotnet pack` (produces `Authplane.Sdk.*.nupkg` and `Authplane.Mcp.*.nupkg`)
+
+## Cross-repo references
+
+- Authplane authorization server: `https://github.com/AuthPlane/authserver`
+- Conformance catalog: `https://github.com/AuthPlane/conformance`
+
+## Editing guidance for AI agents
+
+- Keep nullability and exception semantics consistent.
+- Keep the adapter layer small and explicit.
+- Verification / protocol behavior must remain in `src/Authplane/`.
+- Add tests for resilience or error-mapping changes.
+- Prefer focused diffs over broad reorganizations.
+- Use `[Conformance("rfc...-case-id")]` attributes on tests that verify
+  specific RFC behaviors — the conformance catalog alignment guard will
+  catch any missing markers.

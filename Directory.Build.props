@@ -1,0 +1,55 @@
+<Project>
+  <!--
+    Repo-wide MSBuild defaults. Each .csproj inherits these unless it overrides them.
+    Keep this file minimal: only settings that should apply to every project (src,
+    tests, demo, conformance) live here.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+
+    <!-- Run the editor-style IDE rules during build, not just in `dotnet format`.
+         Pairs with `dotnet_diagnostic.IDE0005.severity = warning` in .editorconfig
+         (and the other `:warning` style rules) so that, combined with
+         `TreatWarningsAsErrors=true`, unused `using` directives and other
+         editor-style violations fail CI instead of accumulating silently.
+         Previously these rules only fired in the IDE / dotnet format. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- IDE0005 only runs in build when GenerateDocumentationFile is true
+         (https://github.com/dotnet/roslyn/issues/41640). Enable it everywhere
+         so the analyzer fires for tests / demo / conformance too. The actual
+         XML doc files produced are small and unused outside `src/`; the
+         missing-doc warning (CS1591) is already on the project-wide NoWarn
+         list so test/demo code without doc comments doesn't fail the build. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- SourceLink + symbol packages for downstream debugger step-through.
+         Effective only on packable projects (IsPackable=true). Demo / tests
+         / conformance carry IsPackable=false so they are not affected.
+         `PublishRepositoryUrl` embeds the repo URL into the .nupkg metadata
+         AND, on the .NET 10 SDK we pin via global.json, implicitly enables
+         the bundled SourceLink GitHub provider — so no explicit
+         `Microsoft.SourceLink.GitHub` PackageReference is needed (and
+         adding one risks a version-drift warning against
+         TreatWarningsAsErrors=true).
+         `EmbedUntrackedSources` makes generated / untracked sources part of
+         the symbol package so step-through works even when the consumer's
+         debugger cannot resolve them via Git.
+         `IncludeSymbols` + `SymbolPackageFormat=snupkg` produces a
+         standalone .snupkg alongside each .nupkg (the modern symbol
+         package format NuGet supports for source-indexed debugging).
+         The publish pipeline must push `*.snupkg` alongside `*.nupkg` to
+         nuget.org for the symbol packages to be discoverable by consumers. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+</Project>

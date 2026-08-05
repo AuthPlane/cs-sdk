@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AUTHSERVER_DIR="${AUTHSERVER_DIR:-$REPO_ROOT/../authserver}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  manual-e2e-setup.sh
+
+Environment (optional):
+  AUTHSERVER_DIR   Path to local authserver repo (default: ../authserver)
+
+What this script does:
+  1) Builds authserver binary if needed
+  2) Starts authserver demo server with client_credentials enabled
+  3) Leaves demo client credentials in:
+     - /tmp/authserver-demo.client-id
+     - /tmp/authserver-demo.key
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [ ! -d "${AUTHSERVER_DIR}" ]; then
+  echo "ERROR: authserver repo not found at ${AUTHSERVER_DIR}" >&2
+  exit 1
+fi
+
+echo "==> Starting authserver demo server (client_credentials enabled)"
+(
+  cd "${AUTHSERVER_DIR}"
+  if [ ! -x "bin/authserver" ]; then
+    go build -o bin/authserver ./cmd/authserver
+  fi
+  AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true ./demo/mcp-demo-server-start.sh
+)
+
+echo ""
+echo "Setup completed."

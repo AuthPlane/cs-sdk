@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Authplane.Conformance</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Required by ConformanceReportWriter to read the implementation assembly metadata. -->
+    <ProjectReference Include="..\..\src\Authplane\Authplane.csproj" />
+  </ItemGroup>
+
+</Project>

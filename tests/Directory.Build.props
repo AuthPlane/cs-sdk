@@ -1,0 +1,22 @@
+<Project>
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
+
+  <PropertyGroup>
+    <!-- CA1707: underscore naming is standard for test methods (Fact_Condition_Expected) -->
+    <!-- CA1861: constant array args in test helpers are acceptable -->
+    <!-- CA1510/CA1512: ThrowIfNull/ThrowIfNegativeOrZero in test helpers is noise -->
+    <!-- CA1822: test helper methods don't always need to be static -->
+    <!-- CA1305: locale-aware ToString in test token minting is fine -->
+    <NoWarn>$(NoWarn);CA1707;CA1861;CA1510;CA1512;CA1822;CA1305</NoWarn>
+
+    <!--
+      Coverlet: each test project is only responsible for the assembly it
+      directly exercises. Authplane.Conformance.Shared is a test-support
+      library; counting it inflates the denominator with code the test
+      project under measure is not designed to cover. Authplane.Mcp.Tests
+      additionally excludes Authplane because the core SDK is covered by
+      Authplane.Tests.
+    -->
+    <Exclude>[Authplane.Conformance.Shared]*</Exclude>
+  </PropertyGroup>
+</Project>
