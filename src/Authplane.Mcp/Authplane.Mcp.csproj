@@ -14,13 +14,13 @@
     <RepositoryUrl>https://github.com/AuthPlane/cs-sdk.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <PackageProjectUrl>https://github.com/AuthPlane/cs-sdk/tree/develop/src/Authplane.Mcp</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/AuthPlane/cs-sdk/tree/main/src/Authplane.Mcp</PackageProjectUrl>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
     <Title>Authplane MCP adapter for .NET</Title>
     <Copyright>Copyright © Authplane Team</Copyright>
-    <PackageReleaseNotes>https://github.com/AuthPlane/cs-sdk/blob/develop/CHANGELOG.md</PackageReleaseNotes>
+    <PackageReleaseNotes>https://github.com/AuthPlane/cs-sdk/blob/main/CHANGELOG.md</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
