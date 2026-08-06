@@ -70,7 +70,7 @@ For patches to an older minor line (not the current default-branch line):
    - the line is strictly older than the default branch's current line.
 2. **Land the fix on `hotfix/vX.Y.Z`** — cherry-pick or commit directly. Add a `## [X.Y.Z]` CHANGELOG entry.
 3. **Dispatch the release** — same as above, from the `hotfix/v*` branch.
-4. **Backport to the default branch** — after publication, port the fix back so the default branch line carries it too. *The dedicated Backport workflow has not been added yet — use the manual cherry-pick fallback below until it lands. Tracked separately.*
+4. **Backport to the default branch** — after publication, port the fix back so the default branch line carries it too. Dispatch **Backport fixes to default branch** from the Actions tab with `fromBranch=vX.Y.Z`; the release branch is deleted by `release.yml`, so use the tag. The workflow wraps `scripts/backport-fixes.sh`, pushes the backport branch and opens the PR. On a cherry-pick conflict it fails loudly — finish locally with the same script.
 
    Manual cherry-pick fallback:
 
@@ -113,6 +113,6 @@ NuGet does not support atomic multi-package uploads. If `publish-nuget.yml` publ
 
    No `--target` — the tag already points at the correct commit on the (now deleted) source branch.
 
-4. If any commits on the source branch need to reach the default branch, port them back via the manual cherry-pick fallback documented in §6.4 (the dedicated **Backport fixes** workflow has not been added yet).
+4. If any commits on the source branch need to reach the default branch, port them back with the **Backport fixes** workflow (§6.4), or the manual cherry-pick fallback documented there.
 
 The git tag is already live, so re-running `release.yml` is not an option (the tag-exists pre-flight refuses).

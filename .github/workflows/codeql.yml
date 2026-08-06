@@ -1,0 +1,73 @@
+name: CodeQL
+
+# Static application security testing (SAST) for the C# sources across both
+# packable projects (Authplane.Sdk, Authplane.Mcp). Runs CodeQL's
+# security-extended query suite on pull requests, pushes to main, and a weekly
+# schedule, uploading results to the GitHub Security tab.
+#
+# Closes the OpenSSF Scorecard "SAST" gap: CodeQL statically analyzes the
+# first-party source, complementing the dependency-vulnerability scanning
+# (the security workflow) that runs separately.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Wednesdays 06:00 UTC
+    - cron: "0 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (csharp)
+    # Code scanning (SARIF upload) requires GitHub Code Security, which is
+    # only available on public repos. Gate on visibility so the job only
+    # runs when the repo is public.
+    if: ${{ github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for CodeQL to upload its SARIF results to code scanning.
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          # 8.0.x alongside 10.0.x: the projects multi-target `net8.0;net10.0`,
+          # so the extractor needs the 8.0 reference packs to compile that leg.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      # build-mode: manual — C# is compiled, so the extractor must observe a
+      # real build. Autobuild guesses at the solution layout; we drive the
+      # compile explicitly below instead.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          languages: csharp
+          build-mode: manual
+          queries: security-extended
+
+      - name: Build solution
+        # Compile every project so the extractor sees all types. Tests are
+        # excluded from the analysis target on purpose: they would also pull
+        # the external conformance catalog, which this workflow does not clone.
+        run: dotnet build Authplane.slnx --configuration Release
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          category: "/language:csharp"
