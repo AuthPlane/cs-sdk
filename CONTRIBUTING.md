@@ -100,7 +100,7 @@ See `demo/README.md` for the demo prerequisites.
 
 ## Pull Request Guidelines
 
-- **Branching:** branch off `develop`. Use `ISSUE-ID-short-description` style; the issue tracker auto-detects the prefix.
+- **Branching:** branch off `main`. Use `ISSUE-ID-short-description` style; the issue tracker auto-detects the prefix.
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) format. Reference the tracked issue in the commit body or footer (e.g. `(ISSUE-ID)`).
 - **PR template:** describe the change, link the issue, list the test plan.
 - **CI:** every PR must pass `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes`, and the conformance suite. Coverage thresholds (80 line / 70 branch) are enforced.
@@ -109,7 +109,7 @@ See `demo/README.md` for the demo prerequisites.
 ## CI / Workflow Expectations
 
 - GitHub Actions are SHA-pinned via [pinact](https://github.com/suzuki-shunsuke/pinact); the manifest is `.pinact.yaml`. To upgrade an action: bump the tag, then `pinact run` to refresh the SHA.
-- The workflow file is `.github/workflows/ci.yml`. Changes to it require a PR (no direct pushes to `develop`).
+- The workflow file is `.github/workflows/ci.yml`. Changes to it require a PR (no direct pushes to `main`).
 
 ## Code of Conduct
 

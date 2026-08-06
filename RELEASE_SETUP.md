@@ -76,11 +76,11 @@ For patches to an older minor line (not the current default-branch line):
 
    ```bash
    git fetch --tags origin
-   git checkout -b backport/<short-desc> origin/develop
+   git checkout -b backport/<short-desc> origin/main
    git cherry-pick vX.Y.Z~..vX.Y.Z   # adjust the range to the hotfix commits
    # resolve any conflicts, then:
    git push origin backport/<short-desc>
-   gh pr create --base develop --title 'chore(backport): port vX.Y.Z fixes to develop' \
+   gh pr create --base main --title 'chore(backport): port vX.Y.Z fixes to main' \
      --body 'Cherry-picked from tag vX.Y.Z. See RELEASE_SETUP.md §6.'
    ```
 

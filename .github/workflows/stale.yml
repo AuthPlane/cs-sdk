@@ -30,7 +30,7 @@ jobs:
             This issue has been automatically marked as stale because it has
             not had activity in 60 days. It will be closed in 30 days if no
             further activity occurs. Add a comment or the `pinned` label to
-            keep it open. See [CONTRIBUTING.md](../blob/develop/CONTRIBUTING.md).
+            keep it open. See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
           stale-pr-message: |
             This PR has been automatically marked as stale because it has
             not had activity in 30 days. It will be closed in 30 days if no

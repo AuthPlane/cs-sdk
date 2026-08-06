@@ -15,7 +15,7 @@ on:
       - ".github/workflows/security.yml"
   push:
     branches:
-      - develop
+      - main
     paths:
       - "**/*.csproj"
       - "**/Directory.Build.props"

@@ -1,6 +1,6 @@
 # Authplane .NET SDK
 
-[![CI](https://img.shields.io/github/actions/workflow/status/AuthPlane/cs-sdk/ci.yml?branch=develop&style=flat-square&label=CI)](https://github.com/AuthPlane/cs-sdk/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/AuthPlane/cs-sdk/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/AuthPlane/cs-sdk/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](LICENSE)
 
 OAuth 2.1 JWT validation and token operations for .NET resource servers, with a first-class adapter for [Model Context Protocol](https://modelcontextprotocol.io/) servers.
