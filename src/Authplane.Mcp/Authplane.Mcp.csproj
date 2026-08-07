@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>Authplane.Mcp</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1-pre.0</Version>
     <Authors>Authplane Team</Authors>
     <Description>Authplane adapter for MCP ASP.NET Core transports.</Description>
     <PackageTags>oauth;jwt;mcp;aspnetcore;authplane</PackageTags>
