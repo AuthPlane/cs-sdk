@@ -1,0 +1,48 @@
+version: 2
+
+updates:
+  # NuGet — the solution at the root resolves both packable projects and the
+  # test projects together, so a single ecosystem block covers the tree.
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - dotnet
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 10
+    groups:
+      # Only minor + patch updates are bundled. Majors fall out of the
+      # group and each gets its own PR so breaking changes are reviewed
+      # one at a time.
+      nuget-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 5
+    groups:
+      # Same approach as the nuget group: bundle minor + patch, let
+      # majors open as individual PRs.
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

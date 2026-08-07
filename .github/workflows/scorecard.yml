@@ -12,7 +12,7 @@ on:
     - cron: "0 6 * * 2"
   push:
     branches:
-      - develop
+      - main
   workflow_dispatch:
 
 permissions: read-all
