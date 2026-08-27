@@ -21,6 +21,9 @@ public sealed class DPoPRequestContext
     /// When set, the inbound DPoP verifier MUST check that the proof carries a <c>nonce</c>
     /// claim whose value matches this string. If the proof is missing the nonce or the
     /// value does not match, verification fails with <see cref="InvalidDPoPProofException"/>.
+    /// Takes precedence over the resource-level
+    /// <see cref="InboundDPoPOptions.NonceIssuer"/> policy when both are
+    /// configured — the same per-request-override rule as <see cref="ReplayStore"/>.
     /// </summary>
     public string? RequiredNonce { get; }
 

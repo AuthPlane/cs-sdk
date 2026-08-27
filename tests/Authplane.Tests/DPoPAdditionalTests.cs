@@ -22,15 +22,7 @@ public sealed class DPoPAdditionalTests : IDisposable
 
     public DPoPAdditionalTests()
     {
-        var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
-
-        _issuer = $"http://localhost:{port}";
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"{_issuer}/");
-        _listener.Start();
+        (_issuer, _listener) = LoopbackHttpListener.Start();
 
         var jwks = BuildJwks(_signingKey, _kid);
         _ = Task.Run(async () =>
@@ -342,15 +334,7 @@ public sealed class DPoPAdditionalTests : IDisposable
     public async Task DPoPNonce_OnSuccess_PersistedToNonceStore()
     {
         // Set up a test server that returns a success response with a DPoP-Nonce header.
-        var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
-
-        var serverUrl = $"http://localhost:{port}";
-        var listener = new HttpListener();
-        listener.Prefixes.Add($"{serverUrl}/");
-        listener.Start();
+        var (serverUrl, listener) = LoopbackHttpListener.Start();
 
         _ = Task.Run(async () =>
         {

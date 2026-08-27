@@ -63,6 +63,22 @@ public sealed class InboundDPoPOptions
     /// </summary>
     public IDPoPReplayStore? ReplayStore { get; }
 
+    /// <summary>
+    /// Server-side nonce policy (RFC 9449 §9). <c>null</c> — the default —
+    /// disables inbound nonce enforcement entirely: proofs verify exactly as
+    /// before whether or not they carry a <c>nonce</c> claim. Non-null makes
+    /// the nonce mandatory on every inbound proof; a missing, unknown, or
+    /// expired nonce raises <see cref="DPoPNonceRequiredException"/> carrying
+    /// a fresh <see cref="IDPoPNonceIssuer.Issue"/> value, which adapters
+    /// surface as 401 <c>error="use_dpop_nonce"</c> plus a <c>DPoP-Nonce</c>
+    /// response header. <see cref="HmacDPoPNonceIssuer"/> is the built-in
+    /// stateless implementation; as with <see cref="ReplayStore"/>,
+    /// multi-process deployments must share state — here, the HMAC key.
+    /// The per-request <see cref="DPoPRequestContext.RequiredNonce"/>
+    /// override takes precedence over this policy when both are set.
+    /// </summary>
+    public IDPoPNonceIssuer? NonceIssuer { get; }
+
     /// <param name="required">When <c>true</c>, bearer-only tokens are rejected
     /// and the PRM flag <c>dpop_bound_access_tokens_required</c> is emitted as
     /// <c>true</c>.</param>
@@ -76,12 +92,16 @@ public sealed class InboundDPoPOptions
     /// <c>null</c> means "inherit the resource-level setting".</param>
     /// <param name="replayStore">Replay detector. <c>null</c> uses a per-resource
     /// in-memory store; multi-process deployments should pass a shared store.</param>
+    /// <param name="nonceIssuer">Server-side nonce policy (RFC 9449 §9).
+    /// <c>null</c> (default) leaves nonce enforcement off; non-null requires
+    /// every inbound proof to carry a nonce this issuer recognises.</param>
     public InboundDPoPOptions(
         bool required = false,
         IEnumerable<string>? allowedProofAlgorithms = null,
         long? maxProofAgeSeconds = null,
         long? clockSkewSeconds = null,
-        IDPoPReplayStore? replayStore = null)
+        IDPoPReplayStore? replayStore = null,
+        IDPoPNonceIssuer? nonceIssuer = null)
     {
         Required = required;
 
@@ -128,5 +148,6 @@ public sealed class InboundDPoPOptions
         MaxProofAgeSeconds = maxProofAgeSeconds ?? DefaultMaxProofAgeSeconds;
         ClockSkewSeconds = clockSkewSeconds ?? DefaultClockSkewSeconds;
         ReplayStore = replayStore;
+        NonceIssuer = nonceIssuer;
     }
 }

@@ -35,6 +35,77 @@ public class AuthplaneVerifierTests
     }
 
     [Fact]
+    public async Task CreateResourceAsync_FragmentInResource_Throws()
+    {
+        // Exercises the authoritative gate in the AuthplaneResource constructor
+        // rather than the early copy in CreateAsync: this path shares an already
+        // built client and performs no fetch of its own.
+        using var server = new OneShotJwksServer("{\"keys\":[]}");
+        await using var client = await AuthplaneClient.CreateAsync(
+            server.IssuerUrl, FetchSettings.FromDevMode(true));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await client.CreateResourceAsync("https://api.example.com/mcp#frag", new[] { "read:data" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("fragment", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CreateResourceAsync_InvalidQuery_Throws()
+    {
+        // Same path as the fragment case above, for the query gate: this is the
+        // one construction path that reaches the constructor without passing the
+        // early copy in CreateAsync, so it is where the constructor's gate is
+        // the only thing standing.
+        using var server = new OneShotJwksServer("{\"keys\":[]}");
+        await using var client = await AuthplaneClient.CreateAsync(
+            server.IssuerUrl, FetchSettings.FromDevMode(true));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await client.CreateResourceAsync("https://api.example.com/mcp?a=\"b\"", new[] { "read:data" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("query", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CreateResourceAsync_NonUrlResource_Rejected()
+    {
+        // A bare URN has a scheme but no host, so RFC 9728 §3 gives it no
+        // derivable metadata URL — this identifier used to be accepted and
+        // quietly derived the garbage
+        // `/.well-known/oauth-protected-resourceexample:api`. Exercises the
+        // authoritative gate in the AuthplaneResource constructor: this path
+        // shares an already built client and performs no fetch of its own.
+        using var server = new OneShotJwksServer("{\"keys\":[]}");
+        await using var client = await AuthplaneClient.CreateAsync(
+            server.IssuerUrl, FetchSettings.FromDevMode(true));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await client.CreateResourceAsync("urn:example:api", new[] { "read:data" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CreateResourceAsync_HttpLocalhostResource_StillAccepted()
+    {
+        // Pins the deliberate profile relaxation: the absolute-URL gate
+        // requires a scheme and a host, not a particular scheme, so an `http`
+        // host keeps working for local development.
+        using var server = new OneShotJwksServer("{\"keys\":[]}");
+        await using var client = await AuthplaneClient.CreateAsync(
+            server.IssuerUrl, FetchSettings.FromDevMode(true));
+
+        await using var resource = await client.CreateResourceAsync(
+            "http://localhost:8080/mcp", new[] { "read:data" });
+
+        Assert.Equal("http://localhost:8080/mcp", resource.Resource);
+    }
+
+    [Fact]
     [Conformance("rfc9728-prm-must-contain-required-fields")]
     [Conformance("rfc9728-prm-authorization-servers-must-list-the-issuer")]
     public async Task GetProtectedResourceMetadata_ReturnsExpectedValues()
@@ -226,15 +297,7 @@ public class AuthplaneVerifierTests
 
         public OneShotJwksServer(string responseBody, bool jwksShouldFail = false)
         {
-            var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-            tcp.Start();
-            var port = ((System.Net.IPEndPoint)tcp.LocalEndpoint).Port;
-            tcp.Stop();
-
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _listener.Start();
-            IssuerUrl = $"http://localhost:{port}";
+            (IssuerUrl, _listener) = LoopbackHttpListener.Start();
 
             _loopTask = Task.Run(async () =>
             {

@@ -41,7 +41,7 @@ await using var resource = await AuthplaneResource.CreateAsync(
 
 ## RFC 9728 — Protected Resource Metadata (PRM)
 
-- **Document URL:** `OAuthProtectedResourceMetadata.GetDocumentUrl(resourceUri)` — template `/.well-known/oauth-protected-resource{path}`.
+- **Document URL:** `OAuthProtectedResourceMetadata.GetDocumentUrl(resourceUri)` — template `/.well-known/oauth-protected-resource{path}{resource-query}`.
 - **JSON:** `resource.GetProtectedResourceMetadata().ToRfc9728Json()` — includes `authorization_servers`, `bearer_methods_supported`, `resource_signing_alg_values_supported`, `scopes_supported`.
 
 The **`Authplane.Mcp`** middleware serves this document **publicly** on `GET` before auth runs, and adds `resource_metadata` to `WWW-Authenticate` challenges (401/403) so MCP clients can discover the authorization server.

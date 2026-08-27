@@ -21,12 +21,7 @@ public sealed class AuthplaneMcpAuthSetupTests : IDisposable
     {
         _ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
-        var port = GetFreePort();
-        _issuer = $"http://localhost:{port}";
-
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://localhost:{port}/");
-        _listener.Start();
+        (_issuer, _listener) = LoopbackHttpListener.Start();
 
         _ = Task.Run(async () =>
         {
@@ -95,14 +90,6 @@ public sealed class AuthplaneMcpAuthSetupTests : IDisposable
         Assert.Equal("http://localhost:8080/mcp", handle.Resource.Resource);
     }
 
-    private static int GetFreePort()
-    {
-        var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
 
     private static string JwksForEs256(ECDsa ecdsa, string kid)
     {

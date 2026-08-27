@@ -26,6 +26,12 @@ This repository follows a common release policy used across all Authplane SDK an
 - Avoid unnecessary dependencies.
 - Do not use local/path-based dependencies in publishable releases.
 - Clearly document supported runtime/toolchain versions.
+- Release `Authplane` and `Authplane.Mcp` together, in lockstep.
+  `Authplane.Mcp` consumes `Authplane` internals via `InternalsVisibleTo`
+  while packing only a lower-bound dependency on it, so a consumer resolving
+  a newer `Authplane` whose internals changed shape would fail at runtime
+  (`MissingMethodException`) instead of at restore time. Cutting both
+  packages from the same tag keeps that pairing exact.
 
 ## Release Process
 

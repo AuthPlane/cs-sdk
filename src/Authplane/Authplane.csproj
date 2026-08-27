@@ -42,6 +42,10 @@
          concurrency patterns with their public counterparts. Not shipped to
          downstream consumers. -->
     <InternalsVisibleTo Include="Authplane.Tests" />
+    <!-- The MCP adapter runs the shared ResourceIdentifiers gates in its
+         Options constructor so a misconfigured identifier fails where the
+         operator writes it (startup), not on the request path. -->
+    <InternalsVisibleTo Include="Authplane.Mcp" />
   </ItemGroup>
 
 </Project>

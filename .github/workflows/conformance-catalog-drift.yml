@@ -1,0 +1,172 @@
+name: Conformance catalog drift
+
+# Early warning for conformance-catalog drift.
+#
+# PR and release CI pin the catalog to the SHA in `.conformance-catalog-ref`, so
+# a new catalog case can never break CI on its own. The trade-off is that new
+# cases go unnoticed until someone bumps the ref. This job closes that gap: on a
+# weekly schedule it checks out the catalog's *default* branch (latest,
+# unpinned), points the harness at it, and runs the same alignment assertion
+# (Authplane.Tests.ConformanceCatalogAlignmentTests) that PR CI runs against the
+# pinned catalog. The only difference is which catalog it reads.
+#
+# This workflow has no `pull_request` trigger, so a failing scheduled run cannot
+# block a PR. It deliberately FAILS on drift, so the run turns red and the
+# `::warning::` plus job-summary note are not buried in an otherwise-green run —
+# prompting a coordinated ref bump alongside the SDK-side coverage.
+
+on:
+  schedule:
+    # Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+# Least-privilege default; this workflow only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Deliberately unpinned, unlike ci.yml and release.yml which fetch the SHA
+      # in `.conformance-catalog-ref`. Reading the tip is what lets this job see
+      # cases added since the pinned ref. Checked out into $RUNNER_TEMP —
+      # outside $GITHUB_WORKSPACE — so the catalog stays out of the working tree.
+      - name: Check out latest shared conformance catalog (default branch)
+        shell: bash
+        run: |
+          git clone --depth=1 https://github.com/AuthPlane/conformance.git \
+            "$RUNNER_TEMP/conformance" \
+            || { echo "::error::Could not clone the conformance catalog default branch"; exit 1; }
+
+      # The alignment assertion raises a plain error when the catalog file is
+      # missing, which the report step below cannot tell apart from real drift.
+      # Reporting a failed clone as drift would send someone hunting for
+      # uncovered cases that do not exist, so label that failure at its own step.
+      - name: Verify the catalog was fetched
+        shell: bash
+        run: |
+          catalog="$RUNNER_TEMP/conformance/oauth-sdk-conformance-catalog.yaml"
+          if [[ ! -f "$catalog" ]]; then
+            echo "::error::The conformance catalog is not at $catalog — the clone step did not produce it. This is a harness problem, not catalog drift."
+            exit 1
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          # Mirrors ci.yml: the 8.0.x runtime alongside the 10.0.x SDK so the
+          # net8.0 target of the multi-targeted test projects executes too.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      # Runs the alignment assertion against the latest catalog. It fails when a
+      # catalog case id has no [Conformance] marker in the suite (a case added
+      # since the pinned ref), or when a marker names an id the catalog no longer
+      # has (a case renamed or dropped upstream). Allowed to fail the job — no
+      # `continue-on-error` — so drift turns the scheduled run red.
+      #
+      # Output is redirected to a file rather than piped, so the exit status is
+      # the test run's own and never that of a downstream filter; the log is
+      # echoed afterwards and re-read by the report step.
+      - name: Run catalog-alignment check against latest catalog
+        id: align
+        shell: bash
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: |
+          log="$RUNNER_TEMP/alignment.log"
+          status=0
+          # TreatNoTestsAsError defaults to false, so a --filter matching nothing
+          # `-- RunConfiguration.<key>=<value>` is inline VSTest runsettings, so
+          # this guard depends on the repo staying on VSTest (xunit 2.x +
+          # xunit.runner.visualstudio 2.x). On the v4 runner line — xunit v3 /
+          # Microsoft.Testing.Platform — everything after `--` is parsed as MTP
+          # arguments and RunConfiguration.* is not one; the MTP equivalent is
+          # --minimum-expected-tests. Revisit here when that bump lands.
+          # only logs "No test matches the given testcase filter" and exits 0 —
+          # this step would report success having asserted nothing, in the one
+          # job whose entire purpose is detecting drift. Rename the test class
+          # and the job goes silently green without it.
+          # Both assemblies, matching PR CI. The MCP one carries no markers
+          # today, so its AssertNoUnknownCaseIds has nothing to check — but the
+          # case it exists for is precisely the assembly growing markers, and an
+          # upstream rename or drop is what this job is meant to catch early.
+          # TreatNoTestsAsError applies to each, or the second inherits the
+          # silently-green failure mode just closed on the first.
+          for proj in tests/Authplane.Tests/Authplane.Tests.csproj \
+                      tests/Authplane.Mcp.Tests/Authplane.Mcp.Tests.csproj; do
+            dotnet test "$proj" \
+              --configuration Release \
+              --filter "FullyQualifiedName~ConformanceCatalogAlignmentTests" \
+              -- RunConfiguration.TreatNoTestsAsError=true \
+              >>"$log" 2>&1 || status=$?
+          done
+          cat "$log"
+          exit "$status"
+
+      # Runs even when the alignment step fails the job, so the `::warning::` and
+      # the job summary are always written on drift. A `failure` outcome alone
+      # does not mean drift — the step also fails on a compile error or a NuGet
+      # restore failure. Real drift is identified by the marker the assertion
+      # writes into its message (ConformanceCatalogAlignment.DriftMarker);
+      # anything else is reported as an infrastructure problem, as are
+      # skipped/cancelled outcomes, where an earlier step failed and the
+      # alignment never ran.
+      - name: Report drift
+        if: always()
+        shell: bash
+        run: |
+          pinned="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+          grep -Eq '^[0-9a-f]{40}$' <<<"$pinned" \
+            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          case "${{ steps.align.outcome }}" in
+            success)
+              {
+                echo "### Conformance catalog: in sync"
+                echo ""
+                echo "The suite is aligned with the latest catalog (default branch)."
+                echo "Pinned ref: \`$pinned\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            failure)
+              if grep -qF 'Conformance-catalog drift:' "$RUNNER_TEMP/alignment.log"; then
+                echo "::warning::Conformance-catalog drift: the alignment check fails against the latest catalog. Cases have been added, renamed or dropped since the pinned ref ($pinned). Review github.com/AuthPlane/conformance, add or correct SDK-side coverage, then bump .conformance-catalog-ref."
+                {
+                  echo "### Conformance catalog: drift detected"
+                  echo ""
+                  echo "The alignment check fails against the **latest** catalog (default branch)."
+                  echo "Cases have been added, renamed or dropped since the pinned ref \`$pinned\`."
+                  echo ""
+                  echo "**Next steps:**"
+                  echo "1. Read the alignment failure in the job log above for the offending case ids."
+                  echo "2. Add or correct the \`[Conformance(...)]\` coverage under \`tests/\`."
+                  echo "3. Bump \`.conformance-catalog-ref\` to the new catalog SHA in the same change."
+                } >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::The alignment step failed without the drift marker. This is a build or harness problem — a compile error or a restore failure — not catalog drift."
+                {
+                  echo "### Conformance catalog: check failed for another reason"
+                  echo ""
+                  echo "The alignment step failed, but its log carries no \`Conformance-catalog drift:\` marker."
+                  echo "That points at a build or harness problem (compile error, NuGet restore), **not** catalog drift."
+                  echo ""
+                  echo "Read the step log above before touching \`.conformance-catalog-ref\`."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+            *)
+              echo "::warning::The alignment check did not run (outcome: ${{ steps.align.outcome }}). An earlier step failed — most likely the catalog clone, the catalog-file guard, or the .NET setup. This is a harness problem, not catalog drift."
+              {
+                echo "### Conformance catalog: check did not run"
+                echo ""
+                echo "The alignment step was \`${{ steps.align.outcome }}\`, so drift was never evaluated."
+                echo "Read the first failing step in the job — this says nothing about the catalog."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac

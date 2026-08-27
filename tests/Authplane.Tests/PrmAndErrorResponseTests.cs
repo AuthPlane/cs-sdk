@@ -23,15 +23,7 @@ public sealed class PrmAndErrorResponseTests : IDisposable
 
     public PrmAndErrorResponseTests()
     {
-        var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
-
-        _issuer = $"http://localhost:{port}";
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"{_issuer}/");
-        _listener.Start();
+        (_issuer, _listener) = LoopbackHttpListener.Start();
 
         var jwks = BuildJwks(_signingKey, _kid);
         _ = Task.Run(async () =>
@@ -147,8 +139,10 @@ public sealed class PrmAndErrorResponseTests : IDisposable
         Assert.Contains("ES256", algList);
     }
 
+    // No [Conformance] marker: the catalog has a case for advertising the DPoP fields when DPoP
+    // *is* configured, but none for omitting them when it is not. This test guards the omission
+    // side as a plain unit test. Add the marker if the catalog grows a matching case.
     [Fact]
-    [Conformance("rfc9728-prm-dpop-fields-omitted-when-not-configured")]
     public void Prm_DPoPFields_OmittedWhenNotConfigured()
     {
         // When no DPoP signing alg values are provided, the field should be absent.
@@ -297,15 +291,7 @@ public sealed class PrmAndErrorResponseTests : IDisposable
 
         public OneShotServer(Func<HttpListenerContext, Task> handler)
         {
-            var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-            tcp.Start();
-            var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-            tcp.Stop();
-
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _listener.Start();
-            IssuerUrl = $"http://localhost:{port}";
+            (IssuerUrl, _listener) = LoopbackHttpListener.Start();
 
             _loop = Task.Run(async () =>
             {

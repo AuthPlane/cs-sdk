@@ -26,6 +26,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Shared by both test projects: the loopback-port bind retry. -->
+    <Compile Include="..\Shared\LoopbackHttpListener.cs" Link="LoopbackHttpListener.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Authplane\Authplane.csproj" />
     <ProjectReference Include="..\Authplane.Conformance.Shared\Authplane.Conformance.Shared.csproj" />
   </ItemGroup>
