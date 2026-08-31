@@ -58,7 +58,9 @@ End-to-end happy path:
    - atomic-pushes branch + tag using the Release Bot token,
    - creates the GitHub Release with notes extracted from CHANGELOG,
    - deletes the source branch.
-4. **`publish-nuget.yml` triggers automatically** on the tag push. It builds, packs, and pushes `Authplane.Sdk` then `Authplane.Mcp` to NuGet. The `nuget` environment gates the publish.
+4. **`publish-nuget.yml` triggers automatically** on the tag push. It builds, packs, and pushes `Authplane.Sdk` then `Authplane.Mcp` to NuGet. The `nuget` environment gates the publish: a `maintainers` reviewer has to approve the deployment before anything reaches nuget.org.
+5. **Record the release in the default branch's changelog.** `release.yml` deletes the source branch, so the `## [X.Y.Z]` heading only ever exists on the tag — the default branch still says `## [Unreleased]`. Open a follow-up PR that renames it and opens a fresh empty `## [Unreleased]` above. The `## [X.Y.Z]` section on the default branch must be a byte-for-byte copy of the tagged one; if the notes need correcting after the fact, edit the GitHub Release body, never the published section.
+6. **Merge the next-dev bump PR** that step 1 opened. It carries the `-pre.N` bump for the default branch, and it does not auto-merge (`allow_auto_merge` is off on this repository), so it needs a manual merge like any other PR.
 
 ## 6. Hotfix flow
 
