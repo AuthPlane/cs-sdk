@@ -132,15 +132,7 @@ public sealed class AuthplaneAuthClientEdgeCoverageTests
 
         public TestServer(Func<HttpListenerContext, Task> handler)
         {
-            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-            listener.Start();
-            var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-            listener.Stop();
-
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _listener.Start();
-            IssuerUrl = $"http://localhost:{port}";
+            (IssuerUrl, _listener) = LoopbackHttpListener.Start();
 
             _loop = Task.Run(async () =>
             {

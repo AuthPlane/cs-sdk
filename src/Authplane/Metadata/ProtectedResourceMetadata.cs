@@ -35,6 +35,23 @@ public sealed class ProtectedResourceMetadata
         DpopSigningAlgValuesSupported = dpopSigningAlgValuesSupported;
         DpopBoundAccessTokensRequired = dpopBoundAccessTokensRequired;
 
+        // This class is the one that *emits* the identifier: ToRfc9728Json writes
+        // `resource` verbatim. Gating only the derivation half (GetDocumentUrl)
+        // would leave the RFC 9728 §3.3 mismatch constructible through public
+        // API — a document naming `…/mcp#frag` served at the URL derived from
+        // `…/mcp`, which a conformant client discards with nothing logged here.
+        //
+        // The same argument carries every axis whose defect makes the derived
+        // URL disagree with the emitted identifier, so all four run here. Only
+        // the query gate is excluded, and for a reason specific to it: a query
+        // is carried into the derived URL, so emitting one raises no mismatch
+        // for this type to prevent.
+        ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfUserInfo(resource, nameof(resource));
+
         // RFC 9728 §3.6 routes `authorization_servers` entries to RFC 8414 §2,
         // which requires each issuer identifier to be an https URL. Allow http only
         // when an explicit dev-mode opt-in (`allowHttp`) is passed, matching the

@@ -69,6 +69,20 @@ public sealed class AuthplaneResource : IAsyncDisposable
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         Resource = resource ?? throw new ArgumentNullException(nameof(resource));
+        // Authoritative identifier gates: every construction path — CreateAsync,
+        // AuthplaneClient.CreateResourceAsync, and the MCP adapter's factory —
+        // funnels through this constructor, so no configured resource can carry
+        // a fragment, whitespace, a backslash, userinfo, or a malformed query
+        // into the PRM document or the derived well-known URL, and no relative,
+        // scheme-relative, or host-less identifier can derive a malformed one.
+        // The fragment check runs first so an identifier broken both ways
+        // reports the fragment.
+        ResourceIdentifiers.ThrowIfFragment(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfMalformedPort(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfNotAbsoluteUrl(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfUserInfo(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidQuery(Resource, nameof(resource));
         Scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
         _ownsClient = ownsClient;
         _revocationChecker = revocationChecker;
@@ -122,7 +136,11 @@ public sealed class AuthplaneResource : IAsyncDisposable
     /// </summary>
     /// <param name="issuer">Authorization server issuer URL (HTTPS) — must match
     /// the <c>iss</c> in tokens this resource will verify.</param>
-    /// <param name="resource">Resource identifier this RS publishes (RFC 9728).</param>
+    /// <param name="resource">Resource identifier this RS publishes (RFC 9728).
+    /// Must be an absolute URL with a scheme and a host (RFC 8707 §2,
+    /// RFC 9728 §3) and must not contain a fragment component (RFC 8707 §2,
+    /// RFC 9728 §1.2); violations are rejected here rather than silently
+    /// producing a malformed metadata URL.</param>
     /// <param name="scopes">Scopes this RS requires; surfaced in PRM and in
     /// <c>WWW-Authenticate</c> on 401 challenges.</param>
     /// <param name="fetchSettings">HTTP/timeout/dev-mode policy; defaults to
@@ -152,6 +170,20 @@ public sealed class AuthplaneResource : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(issuer);
         ArgumentException.ThrowIfNullOrWhiteSpace(resource);
+        // Repeated ahead of the constructor so a bad identifier fails before
+        // the issuer metadata fetch below rather than after a network round
+        // trip. It also keeps these two cases clear of a known leak: the
+        // constructor runs after AuthplaneClient.CreateAsync, and a throw from
+        // it leaks that client (its HttpClient and the JwksCache refresh task
+        // are released only by DisposeAsync). Do not read this guard as a fix
+        // for that — the other throw paths in the constructor still leak, and
+        // the constructor's copies are what actually guarantee the invariant.
+        ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfUserInfo(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidQuery(resource, nameof(resource));
 
         ArgumentNullException.ThrowIfNull(scopes);
 
@@ -339,6 +371,11 @@ public sealed class AuthplaneResource : IAsyncDisposable
             var tokenIsBound = TryGetCnfJkt(jwt, out var cnfJkt);
             var cnfPresent = HasCnf(jwt);
             var proofPresent = dpopRequest is not null && !string.IsNullOrWhiteSpace(dpopRequest.Proof);
+            // Non-null only when a nonce policy accepted the proof's nonce but
+            // wants the client to rotate — surfaced as VerifiedClaims.NextDPoPNonce
+            // so the adapter can advertise it on the success response
+            // (RFC 9449 §8.2 via §9).
+            string? nextDpopNonce = null;
 
             if (_inboundDpop is null)
             {
@@ -376,7 +413,7 @@ public sealed class AuthplaneResource : IAsyncDisposable
                 }
                 else
                 {
-                    await VerifyDpopProofAsyncCore(
+                    nextDpopNonce = await VerifyDpopProofAsyncCore(
                         dpopRequest,
                         expectedJkt: cnfJkt,
                         accessToken: token,
@@ -448,7 +485,8 @@ public sealed class AuthplaneResource : IAsyncDisposable
                 issuedAt: iat,
                 jti: jti,
                 kid: kid,
-                raw: raw);
+                raw: raw,
+                nextDPoPNonce: nextDpopNonce);
         }
         catch (SecurityTokenExpiredException ex)
         {
@@ -466,6 +504,16 @@ public sealed class AuthplaneResource : IAsyncDisposable
         {
             throw;
         }
+        catch (ArgumentException ex)
+        {
+            // A contract violation in a verifier extension (a custom
+            // IDPoPNonceIssuer emitting a non-NQCHAR nonce, for instance) is
+            // the server's fault, not the token's. Folding it into the general
+            // arm below would surface it as invalid_token and send a conformant
+            // client into a re-authenticate loop against a healthy AS.
+            throw new VerifierRuntimeException(
+                "Verifier extension violated its contract: " + ex.Message, ex);
+        }
         catch (Exception ex)
         {
             throw new InvalidSignatureException("Token verification failed: " + ex.Message, ex);
@@ -474,7 +522,12 @@ public sealed class AuthplaneResource : IAsyncDisposable
 
     private const long DpopMaxAgeSeconds = DPoPDefaults.MaxProofAgeSeconds;
 
-    private async Task VerifyDpopProofAsyncCore(
+    /// <returns>
+    /// A fresh nonce to advertise in the <c>DPoP-Nonce</c> header of the
+    /// success response, or <c>null</c> when no nonce policy is configured
+    /// or the accepted nonce is not yet due for rotation (RFC 9449 §8.2).
+    /// </returns>
+    private async Task<string?> VerifyDpopProofAsyncCore(
         DPoPRequestContext? dpopRequest,
         string expectedJkt,
         string accessToken,
@@ -675,9 +728,27 @@ public sealed class AuthplaneResource : IAsyncDisposable
             throw new DPoPBindingMismatchException("DPoP proof key does not match token cnf.jkt.");
         }
 
-        // RFC 9449 §4.3 — nonce validation when the resource server requires it
+        // Server-provided-nonce policy (RFC 9449 §9). Precedence mirrors the
+        // replay store resolution below: the per-request RequiredNonce
+        // override wins over the per-resource NonceIssuer, so a caller
+        // distributing its own nonce values is not second-guessed by the
+        // resource-level policy. With neither configured there is no nonce
+        // policy at all, and a proof that happens to carry an AS-issued
+        // nonce is accepted unchanged rather than rejected for
+        // over-supplying a claim.
+        //
+        // This runs after every §4.3 proof check above so that only
+        // otherwise-valid proofs reach the nonce choreography: a client with
+        // a broken proof gets the proof error, not a nonce it would burn on
+        // a doomed retry. It also runs BEFORE the jti replay CheckAndStore
+        // below, and that ordering is load-bearing for the retry loop: a
+        // nonce-rejected request must not burn its jti, so a client that
+        // re-signs the same jti with the fresh nonce still verifies.
+        string? nextNonce = null;
         if (!string.IsNullOrWhiteSpace(dpopRequest.RequiredNonce))
         {
+            // Legacy exact-echo check (sibling-SDK `expected_nonce` parity):
+            // failures keep InvalidDPoPProofException, as released.
             var proofNonce = GetClaim("nonce");
             if (string.IsNullOrWhiteSpace(proofNonce))
             {
@@ -687,6 +758,34 @@ public sealed class AuthplaneResource : IAsyncDisposable
             if (!string.Equals(proofNonce, dpopRequest.RequiredNonce, StringComparison.Ordinal))
             {
                 throw new InvalidDPoPProofException("DPoP proof nonce mismatch.");
+            }
+        }
+        else if (_inboundDpop?.NonceIssuer is { } nonceIssuer)
+        {
+            var proofNonce = GetClaim("nonce");
+            if (string.IsNullOrWhiteSpace(proofNonce))
+            {
+                // First contact: the client cannot know the nonce yet, so
+                // this is the §9 discovery path — the exception carries the
+                // fresh nonce the adapter advertises with the 401.
+                throw new DPoPNonceRequiredException(
+                    "DPoP proof is missing the resource server nonce; retry with the value from the DPoP-Nonce response header.",
+                    nonceIssuer.Issue());
+            }
+
+            switch (nonceIssuer.Validate(proofNonce))
+            {
+                case DPoPNonceValidationResult.Invalid:
+                    // Expired or not ours. Still `use_dpop_nonce`, NOT
+                    // `invalid_dpop_proof`: the proof itself verified fine,
+                    // and §7.1's code would tell the client to fix a proof
+                    // that isn't broken instead of refreshing the nonce.
+                    throw new DPoPNonceRequiredException(
+                        "DPoP proof nonce is expired or unknown; retry with the value from the DPoP-Nonce response header.",
+                        nonceIssuer.Issue());
+                case DPoPNonceValidationResult.ValidRotationDue:
+                    nextNonce = nonceIssuer.Issue();
+                    break;
             }
         }
 
@@ -702,6 +801,8 @@ public sealed class AuthplaneResource : IAsyncDisposable
         {
             throw new DPoPReplayDetectedException("DPoP proof jti has already been seen.");
         }
+
+        return nextNonce;
     }
 
     private static string NormalizeHtu(string url) => DPoPHtu.Normalize(url);

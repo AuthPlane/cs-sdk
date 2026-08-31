@@ -45,6 +45,22 @@ public static class AuthplaneMcpAuth
         {
             Issuer = issuer ?? throw new ArgumentNullException(nameof(issuer));
             Resource = resource ?? throw new ArgumentNullException(nameof(resource));
+            // The single operator-facing entry for the adapter: every
+            // downstream consumer of the identifier — CreateResourceAsync,
+            // SetupAsync, and UseAuthplaneMcpAuth's DPoP htu origin — receives
+            // it through this Options instance, so gating here makes a
+            // misconfigured identifier fail where the operator writes it, at
+            // startup. In particular the user guide's lazy DI wiring defers
+            // CreateResourceAsync (and the AuthplaneResource constructor
+            // gates) to the first request; without this copy, `/mcp` would
+            // boot cleanly and then take an unhandled exception out of the
+            // middleware on the first request, including the public PRM GET.
+            ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfUserInfo(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfInvalidQuery(resource, nameof(resource));
             Scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
             DevMode = devMode;
             Realm = realm;

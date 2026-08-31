@@ -23,14 +23,10 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
     public AuthplaneMcpAuthMiddlewareTests()
     {
         _ecdsa = Ecdsa.GenerateP256();
-        _listener = new HttpListener();
-        _port = GetFreePort();
-        _issuer = $"http://localhost:{_port}";
+        (_issuer, _listener) = LoopbackHttpListener.Start();
+        _port = new Uri(_issuer).Port;
         _resource = "http://localhost:8080/mcp";
         _kid = "kid_1";
-
-        _listener.Prefixes.Add($"http://localhost:{_port}/");
-        _listener.Start();
 
         _ = Task.Run(async () =>
         {
@@ -428,6 +424,71 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
         var body = await reader.ReadToEndAsync();
         using var doc = JsonDocument.Parse(body);
         Assert.Equal(_resource, doc.RootElement.GetProperty("resource").GetString());
+    }
+
+    [Fact]
+    public async Task ResourceWithQuery_ChallengeAdvertisesQuery_AndPrmRouteStaysPathKeyed()
+    {
+        // RFC 9728 §3 — the well-known string goes "between the host component
+        // and the path and/or query components, if any", so a resource
+        // identifier carrying a query advertises a query-bearing document URL
+        // in the WWW-Authenticate challenge. Routing stays path-keyed: the
+        // same path serves the document regardless of the request's query.
+        var queryResource = "http://localhost:8080/mcp?tenant=a";
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: queryResource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(devMode: true));
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: queryResource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokeRawAsync(
+            requestDelegate,
+            provider,
+            authorizationHeader: null,
+            bodyJson: "{\"method\":\"tools/call\",\"params\":{\"name\":\"add\"}}");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        Assert.Contains(
+            "resource_metadata=\"http://localhost:8080/.well-known/oauth-protected-resource/mcp?tenant=a\"",
+            www,
+            StringComparison.Ordinal);
+
+        // A GET of the advertised URL *verbatim* — path and query — is the one
+        // request a client that just read `resource_metadata` will perform.
+        // ASP.NET Core routes on Request.Path (the query lands in
+        // Request.QueryString), so the query-bearing GET must serve the
+        // document too.
+        var verbatimCtx = await InvokePrmDocumentGetAsync(
+            requestDelegate, provider, queryString: "?tenant=a");
+        Assert.Equal(StatusCodes.Status200OK, verbatimCtx.Response.StatusCode);
+        verbatimCtx.Response.Body.Position = 0;
+        using (var verbatimReader = new System.IO.StreamReader(
+            verbatimCtx.Response.Body, Encoding.UTF8, leaveOpen: true))
+        {
+            var verbatimBody = await verbatimReader.ReadToEndAsync();
+            using var verbatimDoc = JsonDocument.Parse(verbatimBody);
+            Assert.Equal(queryResource, verbatimDoc.RootElement.GetProperty("resource").GetString());
+        }
+
+        // The bare path (query excluded) also serves the PRM document, whose
+        // `resource` field echoes the identifier verbatim, query included.
+        var getCtx = await InvokePrmDocumentGetAsync(requestDelegate, provider);
+        Assert.Equal(StatusCodes.Status200OK, getCtx.Response.StatusCode);
+        getCtx.Response.Body.Position = 0;
+        using var reader = new System.IO.StreamReader(getCtx.Response.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal(queryResource, doc.RootElement.GetProperty("resource").GetString());
     }
 
     [Fact]
@@ -1148,7 +1209,8 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
 
     private async Task<HttpContext> InvokePrmDocumentGetAsync(
         RequestDelegate requestDelegate,
-        ServiceProvider provider)
+        ServiceProvider provider,
+        string? queryString = null)
     {
         var ctx = new DefaultHttpContext();
         ctx.RequestServices = provider;
@@ -1156,6 +1218,7 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
         ctx.Request.Host = new HostString("localhost", 8080);
         ctx.Request.PathBase = PathString.Empty;
         ctx.Request.Path = "/.well-known/oauth-protected-resource/mcp";
+        ctx.Request.QueryString = queryString is null ? QueryString.Empty : new QueryString(queryString);
         ctx.Request.Method = HttpMethods.Get;
         ctx.Response.Body = new System.IO.MemoryStream();
 
@@ -1193,14 +1256,6 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
         return ctx;
     }
 
-    private static int GetFreePort()
-    {
-        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 
     private static string JwksForEs256(ECDsa ecdsa, string kid)
     {

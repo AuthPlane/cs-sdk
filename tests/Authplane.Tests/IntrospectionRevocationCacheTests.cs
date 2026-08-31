@@ -93,15 +93,7 @@ public sealed class IntrospectionRevocationCacheTests
 
         public CountingTestServer(Func<HttpListenerContext, Task> handler)
         {
-            var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-            tcp.Start();
-            var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-            tcp.Stop();
-
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _listener.Start();
-            IssuerUrl = $"http://localhost:{port}";
+            (IssuerUrl, _listener) = LoopbackHttpListener.Start();
 
             _loop = Task.Run(async () =>
             {

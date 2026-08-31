@@ -16,6 +16,16 @@ public sealed class VerifiedClaims
     public string Kid { get; }
     public IReadOnlyDictionary<string, object?> Raw { get; }
 
+    /// <summary>
+    /// Fresh nonce the adapter should advertise in the <c>DPoP-Nonce</c>
+    /// header of the SUCCESS response (RFC 9449 §8.2, applied to resource
+    /// servers via §9). Non-null only when an inbound nonce policy is
+    /// configured and the accepted proof's nonce is due for rotation; the
+    /// client picks it up for its next proof without a 401 round trip.
+    /// Always null when nonce enforcement is off.
+    /// </summary>
+    public string? NextDPoPNonce { get; }
+
     public VerifiedClaims(
         string sub,
         string clientId,
@@ -29,7 +39,8 @@ public sealed class VerifiedClaims
         long issuedAt,
         string jti,
         string kid,
-        IReadOnlyDictionary<string, object?> raw)
+        IReadOnlyDictionary<string, object?> raw,
+        string? nextDPoPNonce = null)
     {
         Sub = sub ?? throw new ArgumentNullException(nameof(sub));
         ClientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
@@ -44,6 +55,19 @@ public sealed class VerifiedClaims
         Jti = jti ?? throw new ArgumentNullException(nameof(jti));
         Kid = kid ?? throw new ArgumentNullException(nameof(kid));
         Raw = raw ?? throw new ArgumentNullException(nameof(raw));
+
+        // Issuer output headed for the DPoP-Nonce header of the success
+        // response — same NQCHAR gate DPoPNonceRequiredException applies on
+        // the 401 path, so a misbehaving custom IDPoPNonceIssuer cannot
+        // reach a response header through either route.
+        if (nextDPoPNonce is not null && !DPoPNonceSyntax.IsValid(nextDPoPNonce))
+        {
+            throw new ArgumentException(
+                "nextDPoPNonce must satisfy RFC 9449 §8.1 NQCHAR syntax (non-empty; no control characters, whitespace, '\"' or '\\'): it is emitted verbatim as the DPoP-Nonce response header value.",
+                nameof(nextDPoPNonce));
+        }
+
+        NextDPoPNonce = nextDPoPNonce;
     }
 
     public bool HasScope(string scope)

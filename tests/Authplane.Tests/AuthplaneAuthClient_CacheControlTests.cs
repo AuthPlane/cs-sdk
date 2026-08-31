@@ -18,11 +18,7 @@ public sealed class AuthplaneAuthClient_CacheControlTests : IDisposable
 
     public AuthplaneAuthClient_CacheControlTests()
     {
-        var port = GetFreePort();
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://localhost:{port}/");
-        _listener.Start();
-        IssuerUrl = $"http://localhost:{port}";
+        (IssuerUrl, _listener) = LoopbackHttpListener.Start();
         _cts = new CancellationTokenSource();
 
         _loop = Task.Run(async () =>
@@ -162,12 +158,4 @@ public sealed class AuthplaneAuthClient_CacheControlTests : IDisposable
                 fetchSettings: FetchSettings.FromDevMode(true)));
     }
 
-    private static int GetFreePort()
-    {
-        var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
 }

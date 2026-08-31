@@ -14,15 +14,31 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       # AuthPlane/conformance is the public repo carrying the shared
-      # oauth-sdk-conformance-catalog.yaml. Cloned to $RUNNER_TEMP — outside
-      # $GITHUB_WORKSPACE — so the catalog stays out of the working tree
-      # (keeps the catalog out of coverage globs and dotnet's source
-      # discovery). Plain git clone is
-      # enough: the repo is public read-only, no auth or persist-credentials
-      # features needed.
-      - name: Clone shared conformance catalog (out of tree)
+      # oauth-sdk-conformance-catalog.yaml. Checked out into $RUNNER_TEMP —
+      # outside $GITHUB_WORKSPACE — so the catalog stays out of the working
+      # tree (keeps it out of coverage globs and dotnet's source discovery).
+      # The runner's built-in git is enough: the repo is public read-only, no
+      # auth or persist-credentials features needed, and no third-party action
+      # surface to SHA-pin.
+      - name: Check out shared conformance catalog (out of tree)
+        # Pinned by SHA (was: clone of the latest default branch). The single
+        # source of truth for the ref is the tracked `.conformance-catalog-ref`
+        # file at the repo root, also read by release.yml — bump it when
+        # adopting new catalog cases, together with the SDK-side conformance
+        # coverage, so a catalog change can never break CI on its own. The
+        # Checkout step above must precede this read.
+        shell: bash
         run: |
-          git clone --depth 1 https://github.com/AuthPlane/conformance.git "$RUNNER_TEMP/conformance"
+          CONFORMANCE_CATALOG_REF="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+          # Guard the pin before fetching: a non-SHA value would silently
+          # un-pin CI to whatever ref resolves at fetch time.
+          grep -Eq '^[0-9a-f]{40}$' <<<"$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          git init -q "$RUNNER_TEMP/conformance"
+          git -C "$RUNNER_TEMP/conformance" \
+            fetch --depth=1 https://github.com/AuthPlane/conformance.git "$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::Pinned conformance catalog ref $CONFORMANCE_CATALOG_REF is unreachable"; exit 1; }
+          git -C "$RUNNER_TEMP/conformance" checkout -q FETCH_HEAD
 
       - name: Setup .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
@@ -74,7 +90,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-report
-          # Both TFMs run under test and each produces its own report.
+          # Nothing writes these files today: ConformanceReportWriter has no
+          # callers, which is this PR's own finding. The step is kept so the
+          # artifact appears the moment the writer is wired, and
+          # if-no-files-found: ignore keeps it quiet until then — it is not
+          # evidence that reporting works.
           path: |
             tests/Authplane.Tests/bin/Release/*/conformance-report.json
             tests/Authplane.Tests/bin/Release/*/conformance-report.md

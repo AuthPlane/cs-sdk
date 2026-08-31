@@ -27,15 +27,7 @@ public sealed class MetadataValidationTests : IDisposable
 
     public MetadataValidationTests()
     {
-        var tcp = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
-
-        _issuer = $"http://localhost:{port}";
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"{_issuer}/");
-        _listener.Start();
+        (_issuer, _listener) = LoopbackHttpListener.Start();
 
         _serverLoop = Task.Run(async () =>
         {

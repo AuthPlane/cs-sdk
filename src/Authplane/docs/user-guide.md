@@ -38,7 +38,7 @@ Always `await using` the client so background JWKS / metadata refresh tasks stop
 | `AuthplaneAuthClient` | OAuth client operations (client credentials, introspection, token exchange, revocation) with circuit breaker. Separate from token verification. |
 | `VerifiedClaims` | Immutable claim set returned from `VerifyAsync`. `RequireScope` for enforcement. |
 | `ProtectedResourceMetadata` | RFC 9728 PRM payload; `ToRfc9728Json()` for the wire format. |
-| `OAuthProtectedResourceMetadata` | Computes the PRM document URL (`/.well-known/oauth-protected-resource{path}`). |
+| `OAuthProtectedResourceMetadata` | Computes the PRM document URL (`/.well-known/oauth-protected-resource{path}{resource-query}`). |
 
 ## 4. Basic usage
 
@@ -66,6 +66,26 @@ claims.RequireScope("tools/query");
 ```
 
 Register `InMemoryDPoPReplayStore` (or your distributed implementation) at startup so `htm` / `htu` / `ath` checks have a replay window.
+
+### Server-provided DPoP nonces (RFC 9449 §9)
+
+A resource server can require every inbound proof to carry a nonce it issued, bounding how far ahead clients can pre-generate proofs. Pass a `nonceIssuer` on `InboundDPoPOptions`, next to the `replayStore`:
+
+```csharp
+var resource = await AuthplaneResource.CreateAsync(
+    issuer: "https://auth.example.com",
+    resource: "https://api.example.com",
+    scopes: new[] { "tools/query" },
+    inboundDpop: new InboundDPoPOptions(
+        replayStore: sharedReplayStore,
+        nonceIssuer: new HmacDPoPNonceIssuer(nonceKey)));
+```
+
+Operational notes:
+
+- **Opt-in.** `nonceIssuer: null` (the default) leaves nonce enforcement off and every existing deployment byte-identical. Non-null makes the nonce mandatory on every inbound proof.
+- **Multi-replica deployments must share the HMAC key.** `HmacDPoPNonceIssuer` nonces are stateless — any instance holding the same key accepts any sibling's nonce — so load the key from configuration or a secret store and pass the same bytes to every replica. `HmacDPoPNonceIssuer.CreateEphemeral()` is the explicit single-process alternative: its key is random and per-process, so behind a load balancer a nonce issued by one replica is rejected by the next and every request degenerates into a hard 401 loop.
+- **Outside `Authplane.Mcp`, the adapter must do two things by hand.** On failure, catch `DPoPNonceRequiredException` and — alongside `AuthplaneErrors.HttpStatus` and `AuthplaneErrors.WwwAuthenticate` — copy every entry from `AuthplaneErrors.ResponseHeaders(ex)` onto the response; that is what carries the `DPoP-Nonce` header a `use_dpop_nonce` challenge is unsatisfiable without. On success, forward `VerifiedClaims.NextDPoPNonce` (when non-null) as the `DPoP-Nonce` response header so active clients rotate without a 401 round trip.
 
 ## 5. Main API reference
 

@@ -21,12 +21,8 @@ public sealed class AuthplaneAuthClientPhase3Tests : IDisposable
 
     public AuthplaneAuthClientPhase3Tests()
     {
-        _listener = new HttpListener();
-        _port = GetFreePort();
-        _issuerUrl = $"http://127.0.0.1:{_port}";
-
-        _listener.Prefixes.Add($"http://127.0.0.1:{_port}/");
-        _listener.Start();
+        (_issuerUrl, _listener) = LoopbackHttpListener.Start("127.0.0.1");
+        _port = new Uri(_issuerUrl).Port;
 
         _ = Task.Run(() => HandleLoopAsync(CancellationToken.None));
     }
@@ -217,13 +213,5 @@ public sealed class AuthplaneAuthClientPhase3Tests : IDisposable
         return JsonDocument.Parse(json);
     }
 
-    private static int GetFreePort()
-    {
-        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }
 

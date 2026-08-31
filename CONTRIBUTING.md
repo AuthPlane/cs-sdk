@@ -76,6 +76,8 @@ The conformance tests load `oauth-sdk-conformance-catalog.yaml` from the shared 
 ```sh
 # 1. Set CONFORMANCE_CATALOG_PATH to a local checkout.
 git clone https://github.com/AuthPlane/conformance.git ../conformance
+# Check out the same ref CI pins, so local runs match CI:
+git -C ../conformance checkout "$(cat .conformance-catalog-ref)"
 CONFORMANCE_CATALOG_PATH=$(pwd)/../conformance/oauth-sdk-conformance-catalog.yaml \
   dotnet test Authplane.slnx --configuration Release
 
@@ -83,11 +85,13 @@ CONFORMANCE_CATALOG_PATH=$(pwd)/../conformance/oauth-sdk-conformance-catalog.yam
 #    runner walks ancestor directories looking for that file.
 ```
 
+CI pins the catalog to the SHA in [`.conformance-catalog-ref`](.conformance-catalog-ref) — a single source of truth read by both `ci.yml` and `release.yml`, so a catalog change can never break CI on its own. Bumping the pin must accompany the matching SDK-side coverage. A weekly `conformance-catalog-drift.yml` job runs the same alignment assertion against the catalog's unpinned tip as an early warning; it runs only on a schedule, so it never blocks a PR.
+
 Add a new test to the conformance suite by:
 
 1. Writing the assertion in the appropriate `tests/*` file.
 2. Decorating the method with `[Conformance("rfc-xxxx-...")]`.
-3. Running the suite — `ConformanceCatalogAlignmentTests.EveryCatalogCase_HasConformanceMarker` will turn green when every catalog case has a marker.
+3. Running the suite — `ConformanceCatalogAlignmentTests.CatalogCasesAndConformanceMarkers_Agree` checks both directions: every catalog case must carry a marker, and every marked id must exist in the catalog.
 
 ### Demo (E2E smoke)
 

@@ -33,6 +33,12 @@ public static class AuthplaneMcpAuthExtensions
         // defense. Only the path varies per-request. A path-rewriting reverse
         // proxy still breaks `htu` matching — the mitigation is to forward the
         // original path, not to fall back to request-derived origin.
+        //
+        // `options.Resource` is pre-gated: the Options constructor is the only
+        // way to build an Options instance and it runs the full identifier
+        // gate set, so this parse cannot see a relative or scheme-relative
+        // value and silently anchor `htu` on the runtime's implicit `file`
+        // origin.
         var parsedResource = new Uri(options.Resource, UriKind.Absolute);
         var resourceOrigin = parsedResource.GetLeftPart(UriPartial.Authority);
         var resourceDefaultPath = string.IsNullOrEmpty(parsedResource.AbsolutePath)
@@ -55,6 +61,12 @@ public static class AuthplaneMcpAuthExtensions
             {
                 var authplaneResource = context.RequestServices.GetRequiredService<AuthplaneResource>();
                 var documentUrl = ProtectedResourceMetadataUrl(authplaneResource);
+                // Routing is path-keyed: `AbsolutePath` excludes any query the
+                // advertised document URL carries (a resource identifier with a
+                // query keeps it in the derived URL per RFC 9728 §3), so the
+                // one configured document is served regardless of the request's
+                // query string. Serving distinct documents per query value is
+                // not supported.
                 var expectedPath = new Uri(documentUrl, UriKind.Absolute).AbsolutePath;
                 var requestPath = context.Request.Path.Value ?? string.Empty;
                 if (PathsMatch(requestPath, expectedPath) ||
@@ -209,7 +221,12 @@ public static class AuthplaneMcpAuthExtensions
             //    callers any work proportional to the body size.
             var requiredScopes = TryResolveRequiredScopesFromHeader(context);
 
-            VerifiedClaims claims;
+            // Nullable only for definite assignment across the catch blocks:
+            // every catch returns, so past the try-catch `claims` is the
+            // successful VerifyAsync result, and inside a catch it is non-null
+            // exactly when VerifyAsync succeeded before the throw (i.e. the
+            // scope-check path).
+            VerifiedClaims? claims = null;
             try
             {
                 claims = await verifier.VerifyAsync(token, dpopRequest, context.RequestAborted).ConfigureAwait(false);
@@ -233,6 +250,14 @@ public static class AuthplaneMcpAuthExtensions
             catch (InsufficientScopeException)
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                // RFC 9449 §8.2 lets the server supply a nonce on any
+                // response: the proof was accepted before the scope check
+                // threw, so a rotation-due nonce would otherwise lose its
+                // hint here and cost the client the 401 round trip later.
+                if (!string.IsNullOrEmpty(claims?.NextDPoPNonce))
+                {
+                    context.Response.Headers[OAuthConstants.Headers.DPoPNonce] = claims.NextDPoPNonce;
+                }
                 // Match the scheme the client actually used: if they presented DPoP, the
                 // 403 stays DPoP; otherwise Bearer (RFC 9449 §7.1).
                 context.Response.Headers.WWWAuthenticate = BuildChallenge(
@@ -299,6 +324,32 @@ public static class AuthplaneMcpAuthExtensions
                 await context.Response.WriteAsync("invalid_token: dpop_replay_detected").ConfigureAwait(false);
                 return;
             }
+            catch (DPoPNonceRequiredException ex)
+            {
+                // RFC 9449 §9 choreography: 401 with a DPoP-scheme challenge
+                // carrying error="use_dpop_nonce" AND the fresh nonce in the
+                // DPoP-Nonce response header. The client re-signs its proof
+                // with that nonce and retries — this is a negotiation step,
+                // not a proof-validity verdict, which is why it carries
+                // neither invalid_token nor invalid_dpop_proof. The extra
+                // headers come from AuthplaneErrors.ResponseHeaders so this
+                // middleware and framework-agnostic adapters share one
+                // exception-to-header mapping.
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                foreach (var (name, value) in AuthplaneErrors.ResponseHeaders(ex))
+                {
+                    context.Response.Headers[name] = value;
+                }
+                context.Response.Headers.WWWAuthenticate = BuildChallenge(
+                    ChallengeScheme.DPoPOnly,
+                    resourceMetadataUrl,
+                    error: OAuthConstants.ErrorCodes.UseDpopNonce,
+                    description: "dpop_nonce_required",
+                    realm: options.Realm,
+                    dpopAlgs: dpopAlgs);
+                await context.Response.WriteAsync("use_dpop_nonce: dpop_nonce_required").ConfigureAwait(false);
+                return;
+            }
             catch (AuthplaneException ex)
             {
                 // Non-DPoP-specific token rejection — advertise whatever the
@@ -309,16 +360,39 @@ public static class AuthplaneMcpAuthExtensions
                 // a Bearer-only verifier throws on inbound DPoP signal, falls
                 // into this branch — advertising Bearer alone is what stops
                 // the negotiate-DPoP-then-reject loop.
-                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                context.Response.Headers.WWWAuthenticate = BuildChallenge(
-                    defaultScheme,
-                    resourceMetadataUrl,
-                    error: "invalid_token",
-                    description: ex.Message,
-                    realm: options.Realm,
-                    dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync($"invalid_token: {ex.Message}").ConfigureAwait(false);
+                var status = AuthplaneErrors.HttpStatus(ex);
+                context.Response.StatusCode = status;
+                if (status == StatusCodes.Status401Unauthorized)
+                {
+                    context.Response.Headers.WWWAuthenticate = BuildChallenge(
+                        defaultScheme,
+                        resourceMetadataUrl,
+                        error: "invalid_token",
+                        description: ex.Message,
+                        realm: options.Realm,
+                        dpopAlgs: dpopAlgs);
+                    await context.Response.WriteAsync($"invalid_token: {ex.Message}").ConfigureAwait(false);
+                }
+                else
+                {
+                    // 5xx means the server side is at fault (JWKS/metadata
+                    // outage, misconfigured verifier extension). No
+                    // WWW-Authenticate: a challenge would direct the client to
+                    // fix credentials that are not the problem.
+                    await context.Response.WriteAsync(ex.Message).ConfigureAwait(false);
+                }
                 return;
+            }
+
+            // RFC 9449 §8.2 (applied to resource servers via §9): when the
+            // verifier accepted a rotation-due nonce it hands back the next
+            // one, advertised here on the success response so an active
+            // client rotates without ever taking the 401 round trip. Set
+            // before next() runs — headers are frozen once the downstream
+            // handler starts the response body.
+            if (!string.IsNullOrEmpty(claims.NextDPoPNonce))
+            {
+                context.Response.Headers[OAuthConstants.Headers.DPoPNonce] = claims.NextDPoPNonce;
             }
 
             // Attach auth context and call next() OUTSIDE the try-catch so

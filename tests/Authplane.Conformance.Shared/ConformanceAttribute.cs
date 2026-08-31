@@ -5,9 +5,10 @@ namespace Authplane.Conformance;
 /// </summary>
 /// <remarks>
 /// Carries the case id plus optional level / gaps / note metadata.
-/// The test method is expected to either (a) run real assertions and call
-/// <see cref="ConformanceTracker.RunAsync"/> to record the outcome, or (b) be picked up
-/// by the catalog-alignment guard which only checks coverage by case id, not test pass/fail.
+/// The test method is picked up by the catalog-alignment guard, which checks
+/// coverage by case id and not test pass/fail. <see cref="ConformanceTracker.RunAsync"/>
+/// would record an outcome per case, but nothing calls it today and nothing consumes
+/// what it would write — see <see cref="ConformanceReportWriter"/>.
 /// </remarks>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
 public sealed class ConformanceAttribute : Attribute
@@ -28,8 +29,9 @@ public sealed class ConformanceAttribute : Attribute
     public string Gaps { get; init; } = "";
 
     /// <summary>
-    /// Free-text note explaining the gap, the deviation, or the rationale. Surfaced in
-    /// the conformance report.
+    /// Free-text note explaining the gap, the deviation, or the rationale. Intended for
+    /// the conformance report, which is not generated today — nothing reads this, or
+    /// <see cref="Level"/>, or <see cref="Gaps"/>.
     /// </summary>
     public string Note { get; init; } = "";
 

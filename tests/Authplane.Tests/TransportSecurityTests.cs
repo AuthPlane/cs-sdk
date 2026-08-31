@@ -47,12 +47,8 @@ public sealed class TransportSecurityTests
         // through TransportSecurity. Spins up a minimal AS metadata + JWKS
         // listener so the assertion is about the policy check, not the absence
         // of a server.
-        var port = GetFreePort();
-        var issuer = $"http://localhost:{port}";
-
-        using var listener = new HttpListener();
-        listener.Prefixes.Add($"http://localhost:{port}/");
-        listener.Start();
+        var (issuer, httpListener) = LoopbackHttpListener.Start();
+        using var listener = httpListener;
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var loop = Task.Run(async () =>
@@ -111,13 +107,5 @@ public sealed class TransportSecurityTests
         listener.Stop();
     }
 
-    private static int GetFreePort()
-    {
-        var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
 }
 

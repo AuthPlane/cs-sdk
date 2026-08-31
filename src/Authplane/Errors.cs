@@ -114,6 +114,48 @@ public sealed class DPoPReplayDetectedException : DPoPException
 }
 
 /// <summary>
+/// Raised when the resource server's inbound nonce policy rejects a DPoP
+/// proof: the <c>nonce</c> claim is missing, was not issued by this server,
+/// or has aged out of the acceptance window. RFC 9449 §9 prescribes the
+/// response — HTTP 401 with a <c>DPoP</c>-scheme challenge carrying
+/// <c>error="use_dpop_nonce"</c> and a fresh nonce in the <c>DPoP-Nonce</c>
+/// response header; the client re-signs its proof with that nonce and
+/// retries. The nonce to advertise is carried in <see cref="NewNonce"/>.
+/// Deliberately not a subclass of <see cref="InvalidDPoPProofException"/>:
+/// §7.1's <c>invalid_dpop_proof</c> tells the client its proof is broken,
+/// while <c>use_dpop_nonce</c> says the proof is fine and only the nonce
+/// needs refreshing — conflating the two breaks the retry choreography.
+/// </summary>
+public sealed class DPoPNonceRequiredException : DPoPException
+{
+    /// <summary>
+    /// Fresh nonce the adapter must emit in the <c>DPoP-Nonce</c> response
+    /// header alongside the 401 challenge (RFC 9449 §9).
+    /// <see cref="AuthplaneErrors.ResponseHeaders"/> surfaces it under the
+    /// right header name so adapters need not special-case this type.
+    /// </summary>
+    public string NewNonce { get; }
+
+    public DPoPNonceRequiredException(string message, string newNonce) : base(message)
+    {
+        ArgumentNullException.ThrowIfNull(newNonce);
+        // Enforced here — once, for every adapter — rather than at each
+        // header-write site: the value is emitted verbatim as the DPoP-Nonce
+        // header, and a custom IDPoPNonceIssuer is third-party code. Same
+        // defence-in-depth stance as EscapeQuotedString below, except issuer
+        // output is a contract violation to reject, not input to sanitise.
+        if (!DPoPNonceSyntax.IsValid(newNonce))
+        {
+            throw new ArgumentException(
+                "newNonce must satisfy RFC 9449 §8.1 NQCHAR syntax (non-empty; no control characters, whitespace, '\"' or '\\'): it is emitted verbatim as the DPoP-Nonce response header value.",
+                nameof(newNonce));
+        }
+
+        NewNonce = newNonce;
+    }
+}
+
+/// <summary>
 /// Raised when a resource has not opted into inbound DPoP but the request
 /// carries a DPoP signal — either a DPoP-bound access token (<c>cnf.jkt</c>)
 /// or a <c>DPoP</c> proof header. RFC 9449 §7 forbids silently downgrading
@@ -312,6 +354,12 @@ public static class AuthplaneErrors
     /// DPoP errors use the <c>DPoP</c> scheme — except
     /// <see cref="DPoPNotSupportedException"/>, which uses <c>Bearer</c>;
     /// all others use <c>Bearer</c>.
+    /// A framework-agnostic adapter builds a complete error response from
+    /// three calls: <see cref="HttpStatus"/> for the status code, this
+    /// helper for the challenge, and <see cref="ResponseHeaders"/> for the
+    /// extra headers some errors require — a
+    /// <see cref="DPoPNonceRequiredException"/> challenge without its
+    /// <c>DPoP-Nonce</c> header is unsatisfiable (RFC 9449 §9).
     /// </summary>
     public static string WwwAuthenticate(AuthplaneException error, string realm = "")
     {
@@ -319,9 +367,14 @@ public static class AuthplaneErrors
         {
             InsufficientScopeException => OAuthConstants.ErrorCodes.InsufficientScope,
             // RFC 9449 §7.1 prescribes `invalid_dpop_proof` for §4.3
-            // cardinality rejections; the other DPoP failures keep
-            // `invalid_token`.
+            // cardinality rejections, and §9 prescribes `use_dpop_nonce`
+            // for nonce-policy rejections. This helper only builds the
+            // challenge value — the DPoP-Nonce response header the §9
+            // choreography also requires comes from ResponseHeaders, which
+            // the adapter (having the response in hand) must apply. The
+            // other DPoP failures keep `invalid_token`.
             DPoPMultipleProofsException => OAuthConstants.ErrorCodes.InvalidDPoPProof,
+            DPoPNonceRequiredException => OAuthConstants.ErrorCodes.UseDpopNonce,
             _ => OAuthConstants.ErrorCodes.InvalidToken,
         };
         // DPoPNotSupportedException is thrown by a resource that does NOT
@@ -387,6 +440,8 @@ public static class AuthplaneErrors
 
     /// <summary>
     /// Map an <see cref="AuthplaneException"/> to an HTTP status code.
+    /// Pair with <see cref="WwwAuthenticate"/> and
+    /// <see cref="ResponseHeaders"/> when building an error response.
     /// </summary>
     public static int HttpStatus(AuthplaneException error) => error switch
     {
@@ -403,6 +458,34 @@ public static class AuthplaneErrors
         VerifierRuntimeException => 500,
         _ => 500,
     };
+
+    private static readonly IReadOnlyDictionary<string, string> NoResponseHeaders =
+        System.Collections.ObjectModel.ReadOnlyDictionary<string, string>.Empty;
+
+    /// <summary>
+    /// Extra response headers a correct error response must carry alongside
+    /// the <see cref="HttpStatus"/> code and <see cref="WwwAuthenticate"/>
+    /// challenge. Today the only entry is <c>DPoP-Nonce</c> for
+    /// <see cref="DPoPNonceRequiredException"/>: RFC 9449 §9 requires the
+    /// fresh nonce on the <c>use_dpop_nonce</c> 401, and without it a
+    /// conformant client has nothing to re-sign with and burns its single
+    /// §8 retry. Every other error maps to an empty dictionary. Adapters
+    /// should copy every entry onto the response rather than special-casing
+    /// exception types — the set grows if a future error requires a header.
+    /// The built-in MCP middleware consumes this same mapping.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> ResponseHeaders(AuthplaneException error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        return error switch
+        {
+            DPoPNonceRequiredException nonceRequired => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [OAuthConstants.Headers.DPoPNonce] = nonceRequired.NewNonce,
+            },
+            _ => NoResponseHeaders,
+        };
+    }
 
     /// <summary>
     /// Map an RFC 6749 §5.2 OAuth error response onto a typed

@@ -19,17 +19,10 @@ public sealed class DPoPInboundTests : IDisposable
 
     public DPoPInboundTests()
     {
-        var listener = new HttpListener();
-        var port = GetFreePort();
-        _port = port;
-        _listener = listener;
-
-        _issuer = $"http://localhost:{_port}";
+        (_issuer, _listener) = LoopbackHttpListener.Start();
+        _port = new Uri(_issuer).Port;
         _resource = "https://api.example.com";
         _kid = "kid_1";
-
-        _listener.Prefixes.Add($"http://localhost:{_port}/");
-        _listener.Start();
     }
 
     public void Dispose()
@@ -251,14 +244,6 @@ public sealed class DPoPInboundTests : IDisposable
         return $"{headerSeg}.{payloadSeg}.x";
     }
 
-    private static int GetFreePort()
-    {
-        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 
     private static string JwksForEs256(ECDsa ecdsa, string kid)
     {

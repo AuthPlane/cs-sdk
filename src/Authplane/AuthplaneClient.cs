@@ -116,7 +116,11 @@ public sealed class AuthplaneClient : IAsyncDisposable
     /// <see cref="AuthplaneResource.CreateAsync"/> when a process hosts more than
     /// one RS against the same AS.
     /// </summary>
-    /// <param name="resource">Resource identifier this RS publishes (RFC 9728).</param>
+    /// <param name="resource">Resource identifier this RS publishes (RFC 9728).
+    /// Must be an absolute URL with a scheme and a host (RFC 8707 §2,
+    /// RFC 9728 §3) and must not contain a fragment component (RFC 8707 §2,
+    /// RFC 9728 §1.2); violations are rejected here rather than silently
+    /// producing a malformed metadata URL.</param>
     /// <param name="scopes">Scopes this RS requires; surfaced in PRM and on 401
     /// challenges.</param>
     /// <param name="revocationChecker">Optional revocation hook (RFC 7009).</param>
