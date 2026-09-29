@@ -65,6 +65,22 @@ Typical mapping for HTTP APIs:
 | `DPoPProofMissingException`, `InvalidDPoPProofException`, `DPoPBindingMismatchException`, `DPoPReplayDetectedException` | 401 | DPoP-bound token issues. |
 | `JwksFetchException` | 502/503 | JWKS or discovery fetch failed. |
 
+### What the caller is told
+
+Both halves of a failure response — the `WWW-Authenticate` challenge and the JSON body — are built from one error code and the fixed sentence it selects, never from the exception's message:
+
+| `error` | `error_description` |
+|---|---|
+| `invalid_token` | `The access token is missing or not valid for this resource` |
+| `insufficient_scope` | `The access token does not carry the scope this operation requires` |
+| `invalid_dpop_proof` | `The DPoP proof is missing or not valid for this request` |
+| `invalid_request` (no credentials presented) | `The request did not carry an access token` |
+| anything else, `use_dpop_nonce` included | `The request could not be authenticated` |
+
+The response reaches a caller who by definition has not authenticated, and the SDK's messages name the failing detail — the unknown `kid`, the claim that did not validate, and on an audience mismatch the exact `aud` the resource expects, which is the value they would need in order to request a token for it. RFC 6750 §3 does not require `error_description` to be diagnostic; the `error` code already carries what a conforming client acts on. The message stays on the exception, so log it server-side.
+
+`AuthplaneErrors.WwwAuthenticate(error, realm, verboseDescription: true)` and `AuthplaneErrors.ErrorResponseBody(code, error, verboseDescription: true)` restore the message for local debugging. They disclose SDK internals to unauthenticated callers; do not enable them in production.
+
 OAuth **client** flows (`AuthplaneAuthClient`) use `AuthplaneTokenRequestException`, `ConsentRequiredException`, `CircuitOpenException`, etc.; circuit breaker records failures only for transport/server-class errors (see `CircuitPolicy`).
 
 ## Security notes

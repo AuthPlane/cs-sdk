@@ -7,8 +7,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_SETUP=1
 RESOURCE_URL="${RESOURCE_URL:-http://localhost:8080/mcp}"
 ISSUER_URL="${ISSUER_URL:-http://localhost:9000}"
-ADMIN_URL="${ADMIN_URL:-http://localhost:9001}"
-ADMIN_KEY="${ADMIN_KEY:-b480b9760e730abe43b98d0ba01418961df392de0fc6358c36a9a62a8764a7c1}"
 SERVER_LOG="/tmp/csharp-adapters-manual-e2e-smoke.log"
 
 usage() {
@@ -43,29 +41,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-register_scope() {
-  local scope_name="$1"
-  local status
-  status="$(
-    curl -sS -o /dev/null -w "%{http_code}" \
-      -X POST "${ADMIN_URL}/admin/scopes" \
-      -H "Authorization: Bearer ${ADMIN_KEY}" \
-      -H "Content-Type: application/json" \
-      -d "{\"resource\":\"${RESOURCE_URL}\",\"name\":\"${scope_name}\",\"description\":\"Manual E2E smoke scope ${scope_name}\"}" \
-      || true
-  )"
-  if [ "${status}" != "201" ] && [ "${status}" != "409" ]; then
-    echo "WARN: could not ensure scope ${scope_name} for ${RESOURCE_URL} (status=${status}); continuing" >&2
-  fi
-}
-
 if [ "${RUN_SETUP}" -eq 1 ]; then
   bash "${SCRIPT_DIR}/manual-e2e-setup.sh"
 fi
 
-echo "==> Ensuring authserver scopes for resource: ${RESOURCE_URL}"
-register_scope "tools/add"
-register_scope "tools/multiply"
+# The demo scopes (tools/add, tools/multiply) are created by the authserver
+# demo provisioner started in setup; there is no /admin/scopes route to
+# register them against.
 
 echo "==> Starting C# demo server"
 (

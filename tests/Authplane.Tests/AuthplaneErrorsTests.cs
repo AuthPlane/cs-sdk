@@ -20,7 +20,13 @@ public sealed class AuthplaneErrorsTests
         var header = AuthplaneErrors.WwwAuthenticate(new TokenExpiredException("expired"));
         Assert.StartsWith("Bearer ", header, StringComparison.Ordinal);
         Assert.Contains("error=\"invalid_token\"", header, StringComparison.Ordinal);
-        Assert.Contains("error_description=\"expired\"", header, StringComparison.Ordinal);
+        // The message ("expired") no longer reaches the wire: the description is
+        // the fixed sentence the error code selects.
+        Assert.Contains(
+            "error_description=\"The access token is missing or not valid for this resource\"",
+            header,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("expired", header, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,9 +97,16 @@ public sealed class AuthplaneErrorsTests
             new TokenExpiredException("bad \"token\" with \\ slash"),
             realm: "api \"prod\" \\");
 
+        // The fixed description carries no quote or backslash to escape, so the
+        // message path is exercised through the verbose overload instead — the
+        // one way an operator can still put a caller-influenced string here.
+        var verbose = AuthplaneErrors.WwwAuthenticate(
+            new TokenExpiredException("bad \"token\" with \\ slash"),
+            realm: "",
+            verboseDescription: true);
         Assert.Contains(
             "error_description=\"bad \\\"token\\\" with \\\\ slash\"",
-            header,
+            verbose,
             StringComparison.Ordinal);
         Assert.Contains(
             "realm=\"api \\\"prod\\\" \\\\\"",
@@ -122,7 +135,17 @@ public sealed class AuthplaneErrorsTests
         Assert.DoesNotContain("\t", header, StringComparison.Ordinal);
         Assert.DoesNotContain("\x7f", header, StringComparison.Ordinal);
 
-        Assert.Contains("error_description=\"expiredX-Injected: 1tab\"", header, StringComparison.Ordinal);
+        // As above: the fixed description has no CTL to strip, so the stripping
+        // is pinned on the message through the verbose overload.
+        var verbose = AuthplaneErrors.WwwAuthenticate(
+            new TokenExpiredException("expired\r\nX-Injected: 1\ttab\x7f"),
+            realm: "",
+            verboseDescription: true);
+        Assert.DoesNotContain("\r", verbose, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", verbose, StringComparison.Ordinal);
+        Assert.DoesNotContain("\t", verbose, StringComparison.Ordinal);
+        Assert.DoesNotContain("\x7f", verbose, StringComparison.Ordinal);
+        Assert.Contains("error_description=\"expiredX-Injected: 1tab\"", verbose, StringComparison.Ordinal);
         Assert.Contains("realm=\"apiX-Realm-Injection: yes\"", header, StringComparison.Ordinal);
     }
 
@@ -158,6 +181,52 @@ public sealed class AuthplaneErrorsTests
         Assert.Equal(500, AuthplaneErrors.HttpStatus(new CircuitOpenException()));
     }
 
+    [Fact]
+    public void ServerErrorCodeFor_Separates503FromEveryOther5xx()
+    {
+        // server_error reads as a fault in this resource server. A 503 here is
+        // the authorization server being unreachable — transient, and worth a
+        // retry — which is what RFC 6749 §5.2's temporarily_unavailable says.
+        Assert.Equal("temporarily_unavailable", AuthplaneErrors.ServerErrorCodeFor(503));
+        Assert.Equal("server_error", AuthplaneErrors.ServerErrorCodeFor(500));
+
+        // Keyed off the status, so the two exceptions that produce a 503 reach
+        // the transient code and CircuitOpenException — 500 by the default arm
+        // above — does not.
+        Assert.Equal(
+            "temporarily_unavailable",
+            AuthplaneErrors.ServerErrorCodeFor(AuthplaneErrors.HttpStatus(new JwksFetchException("unreachable"))));
+        Assert.Equal(
+            "temporarily_unavailable",
+            AuthplaneErrors.ServerErrorCodeFor(AuthplaneErrors.HttpStatus(new MetadataFetchException("unreachable"))));
+        Assert.Equal(
+            "server_error",
+            AuthplaneErrors.ServerErrorCodeFor(AuthplaneErrors.HttpStatus(new CircuitOpenException())));
+    }
+
+    [Fact]
+    public void TemporarilyUnavailable_CarriesASafeDescription()
+    {
+        var description = AuthplaneErrors.ErrorDescriptionFor(AuthplaneErrors.TemporarilyUnavailableCode);
+
+        Assert.NotEqual(AuthplaneErrors.FallbackErrorDescription, description);
+        // The same rule the rest of the table follows: no comma, because a
+        // comma separates challenge parameters in a WWW-Authenticate value.
+        Assert.DoesNotContain(",", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorResponseBody_For503_NamesTheTransientCode()
+    {
+        var body = AuthplaneErrors.ErrorResponseBody(AuthplaneErrors.ServerErrorCodeFor(503));
+
+        using var doc = System.Text.Json.JsonDocument.Parse(body);
+        Assert.Equal("temporarily_unavailable", doc.RootElement.GetProperty("error").GetString());
+        Assert.Equal(
+            AuthplaneErrors.ErrorDescriptionFor(AuthplaneErrors.TemporarilyUnavailableCode),
+            doc.RootElement.GetProperty("error_description").GetString());
+    }
+
     // -----------------------------------------------------------------------
     // MapOAuthError
     // -----------------------------------------------------------------------
@@ -169,6 +238,7 @@ public sealed class AuthplaneErrorsTests
     [InlineData("invalid_scope", typeof(InvalidScopeException))]
     [InlineData("invalid_request", typeof(InvalidRequestException))]
     [InlineData("unsupported_grant_type", typeof(UnsupportedGrantTypeException))]
+    [InlineData("invalid_target", typeof(InvalidTargetException))]
     public void MapOAuthError_DispatchesTypedSubclass(string oauthError, Type expectedType)
     {
         var ex = (AuthplaneTokenRequestException)AuthplaneErrors.MapOAuthError(
@@ -182,6 +252,21 @@ public sealed class AuthplaneErrorsTests
         Assert.Equal(400, ex.HttpStatus);
         Assert.Equal("describe", ex.ErrorDescription);
         Assert.Equal("https://errors.example.com/x", ex.ErrorUri);
+    }
+
+    [Fact]
+    public void MapOAuthError_AccessDenied403_ReturnsAccessDeniedException()
+    {
+        // authserver 0.2.0 answers a cross-client exchange the Resource has not
+        // allow-listed with access_denied + 403. Must not collapse into the
+        // bare-401/403 InvalidClient handling or the generic base type.
+        var ex = Assert.IsType<AccessDeniedException>(AuthplaneErrors.MapOAuthError(
+            oauthError: "access_denied",
+            httpStatus: 403,
+            errorDescription: "client not allowed to exchange for this resource"));
+        Assert.Equal("access_denied", ex.OAuthError);
+        Assert.Equal(403, ex.HttpStatus);
+        Assert.Equal("client not allowed to exchange for this resource", ex.ErrorDescription);
     }
 
     [Fact]
@@ -284,5 +369,117 @@ public sealed class AuthplaneErrorsTests
             consentUrl: "   ");
         var consent = Assert.IsType<ConsentRequiredException>(ex);
         Assert.Null(consent.ConsentUrl);
+    }
+
+    // -----------------------------------------------------------------------
+    // ErrorResponseBody
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ErrorResponseBody_NeverCarriesTheExceptionMessage()
+    {
+        // The body reaches a caller who has not authenticated, and the SDK's
+        // messages name the failing detail — here the exact audience the
+        // resource expects, which is the value a caller needs in order to go
+        // request a token for it.
+        var json = AuthplaneErrors.ErrorResponseBody(
+            AuthplaneErrors.ErrorCodeFor(
+                new InvalidClaimsException("aud mismatch: expected https://api.example.com/mcp")));
+
+        Assert.Contains(
+            "\"error_description\":\"The access token is missing or not valid for this resource\"",
+            json,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("api.example.com", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorResponseBody_OmitsTheErrorCodeWhenNoCredentialsWerePresented()
+    {
+        // The three pre-token 401 paths build a challenge with no `error`
+        // parameter, as RFC 6750 §3 requires for a request that carried no
+        // authentication information. The body has to make the same omission:
+        // §3.1 ties `invalid_request` to a malformed request answered with
+        // 400, so naming it here would both misreport the failure and put the
+        // body at odds with the header it travels with.
+        var json = AuthplaneErrors.ErrorResponseBody();
+
+        Assert.DoesNotContain("\"error\":", json, StringComparison.Ordinal);
+        Assert.Equal(
+            "{\"error_description\":\"The request did not carry a usable access token\"}",
+            json);
+    }
+
+    [Fact]
+    public void ErrorDescriptionFor_AcceptsNullTheWayErrorResponseBodyDoes()
+    {
+        // The XML doc invites an adapter to compose a challenge "from a code it
+        // already knows", and ErrorResponseBody documents null as the
+        // no-credentials case. An adapter holding one nullable code feeds both,
+        // so the pair has to answer, not throw: Dictionary.TryGetValue raises
+        // ArgumentNullException on a null key.
+        Assert.Equal(
+            "The request did not carry a usable access token",
+            AuthplaneErrors.ErrorDescriptionFor(null));
+        Assert.Equal(
+            "The request did not carry a usable access token",
+            AuthplaneErrors.ErrorDescriptionFor(string.Empty));
+
+        // and the two halves agree on it
+        Assert.Contains(
+            "\"error_description\":\"" + AuthplaneErrors.ErrorDescriptionFor(null) + "\"",
+            AuthplaneErrors.ErrorResponseBody(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorResponseBody_FallsBackForACodeWithNoRow()
+    {
+        // use_dpop_nonce is the live case: no sibling SDK carries a row for it,
+        // so it takes the contentless fallback rather than a sentence this SDK
+        // invented on its own.
+        var json = AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.UseDpopNonce);
+
+        Assert.Contains("\"error\":\"use_dpop_nonce\"", json, StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"error_description\":\"{AuthplaneErrors.FallbackErrorDescription}\"",
+            json,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorResponseBody_AgreesWithTheChallengeItTravelsWith()
+    {
+        // One table, two surfaces: a client reads whichever half it finds, so
+        // they must not drift.
+        var error = new InsufficientScopeException("missing tools/delete");
+        var header = AuthplaneErrors.WwwAuthenticate(error);
+        var json = AuthplaneErrors.ErrorResponseBody(AuthplaneErrors.ErrorCodeFor(error));
+
+        Assert.Contains(
+            $"error_description=\"{AuthplaneErrors.ErrorDescriptionFor(AuthplaneErrors.ErrorCodeFor(error))}\"",
+            header,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"error_description\":\"The access token does not carry the scope this operation requires\"",
+            json,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorResponseBody_RestoresTheMessageUnderVerboseDescription()
+    {
+        // The development escape hatch, and the reason the body is serialized
+        // rather than interpolated: JSON escaping has to hold for a message
+        // carrying quotes and CRLF.
+        var json = AuthplaneErrors.ErrorResponseBody(
+            OAuthConstants.ErrorCodes.InvalidToken,
+            new TokenExpiredException("bad \"token\"\r\nX-Injected: 1"),
+            verboseDescription: true);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal(
+            "bad \"token\"\r\nX-Injected: 1",
+            doc.RootElement.GetProperty("error_description").GetString());
     }
 }

@@ -14,6 +14,10 @@ OAuth 2.1 JWT validation and token operations for .NET resource servers, with a 
 
 Requires .NET 8.0 or later.
 
+## Compatibility
+
+Tested against authserver 0.2.0. Introspection-based revocation (`IntrospectionRevocation`) requires authserver 0.1.2 or later.
+
 ## Capabilities
 
 ### Standards and RFCs

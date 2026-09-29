@@ -12,6 +12,38 @@ public sealed class AuthplaneClient : IAsyncDisposable
     private readonly HttpClient _httpClient;
     private readonly JwksCache _jwksCache;
     private readonly MetadataCache _metadataCache;
+    private int _disposed;
+
+    /// <summary>
+    /// Counts clients constructed and disposed while attached. Lifetime assertions need
+    /// this because the resources a client owns — the <see cref="HttpClient"/> and the
+    /// JWKS refresh state — are reachable only through the instance, so a client this
+    /// assembly builds on the caller's behalf and then abandons cannot be observed any
+    /// other way.
+    /// </summary>
+    internal sealed class LifetimeProbe
+    {
+        private int _constructed;
+        private int _disposed;
+
+        internal int Constructed => Volatile.Read(ref _constructed);
+
+        internal int Disposed => Volatile.Read(ref _disposed);
+
+        /// <summary>Constructed clients not yet released. Must be zero once a call returns.</summary>
+        internal int Live => Constructed - Disposed;
+
+        internal void NoteConstructed() => Interlocked.Increment(ref _constructed);
+
+        internal void NoteDisposed() => Interlocked.Increment(ref _disposed);
+    }
+
+    /// <summary>
+    /// Attachment point for a <see cref="LifetimeProbe"/>. Scoped to the current async
+    /// control flow rather than the process, so an assertion sees only the clients its own
+    /// call built and is unaffected by clients other tests construct in parallel.
+    /// </summary>
+    internal static readonly AsyncLocal<LifetimeProbe?> Probe = new();
 
     private AuthplaneClient(string issuer, FetchSettings fetchSettings)
     {
@@ -84,6 +116,10 @@ public sealed class AuthplaneClient : IAsyncDisposable
 
             return new JwksFetchResult(jwks, serverTtl);
         }, refreshInterval: TimeSpan.FromMinutes(5));
+
+        // Last statement in the constructor: every field that DisposeAsync releases is
+        // now assigned, so a counted instance is always a disposable one.
+        Probe.Value?.NoteConstructed();
     }
 
     public string Issuer { get; }
@@ -104,9 +140,26 @@ public sealed class AuthplaneClient : IAsyncDisposable
 
         var settings = fetchSettings ?? FetchSettings.FromDevMode(devMode: false);
         var client = new AuthplaneClient(issuer, settings);
-        // Force initial metadata fetch so a bad issuer fails at CreateAsync rather than
-        // at the first token-verify call.
-        await client._metadataCache.GetAsync(cancellationToken).ConfigureAwait(false);
+
+        // The client is owned here until it is returned: the priming fetch throws on an
+        // unreachable AS, on metadata that does not validate, and when the caller's token
+        // is cancelled, and every one of those exits would otherwise abandon a client
+        // nothing can reach — its HttpClient and handler, the metadata cache's semaphore
+        // and background refresh, and the JWKS cache's gate are released only by
+        // DisposeAsync. A caller retrying a flapping AS accumulates one set per attempt.
+        // Dispose it here and let the original failure propagate.
+        try
+        {
+            // Force initial metadata fetch so a bad issuer fails at CreateAsync rather than
+            // at the first token-verify call.
+            await client._metadataCache.GetAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await client.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
         return client;
     }
 
@@ -118,9 +171,11 @@ public sealed class AuthplaneClient : IAsyncDisposable
     /// </summary>
     /// <param name="resource">Resource identifier this RS publishes (RFC 9728).
     /// Must be an absolute URL with a scheme and a host (RFC 8707 §2,
-    /// RFC 9728 §3) and must not contain a fragment component (RFC 8707 §2,
-    /// RFC 9728 §1.2); violations are rejected here rather than silently
-    /// producing a malformed metadata URL.</param>
+    /// RFC 9728 §3) whose host is within the RFC 3986 §3.2.2 production — an
+    /// internationalized host belongs in a URI as its A-label — and must not
+    /// contain a fragment component (RFC 8707 §2, RFC 9728 §1.2); violations are
+    /// rejected here rather than silently producing a malformed metadata
+    /// URL.</param>
     /// <param name="scopes">Scopes this RS requires; surfaced in PRM and on 401
     /// challenges.</param>
     /// <param name="revocationChecker">Optional revocation hook (RFC 7009).</param>
@@ -364,8 +419,17 @@ public sealed class AuthplaneClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Idempotent: a caller that disposes a client this assembly already disposed on a
+        // failed construction path must not double-release, and the live count has to
+        // move exactly once per instance to mean anything.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         await _jwksCache.DisposeAsync().ConfigureAwait(false);
         await _metadataCache.DisposeAsync().ConfigureAwait(false);
         _httpClient.Dispose();
+        Probe.Value?.NoteDisposed();
     }
 }

@@ -2,18 +2,30 @@ name: Lint workflows
 
 # Catches workflow YAML / shell-in-`run:` regressions at PR time so a
 # typo can't reach a release tag and surface only when a publish run
-# fails. Scoped to changes under `.github/workflows/**` to keep CI
-# overhead off unrelated PRs.
+# fails. Scoped to changes under `.github/workflows/**` and
+# `.github/scripts/*.sh` to keep CI overhead off unrelated PRs.
+#
+# `.github/scripts/*.sh` is in scope because those scripts stopped being
+# thin fetch wrappers once the conformance case-body drift check landed
+# there, and they run only on a weekly schedule, so a break in them
+# surfaces late and quietly. The trigger stays narrow: the added path
+# matches PRs touching those scripts, not every PR touching
+# `.github/**`.
+#
+# Linting alone would not be enough for them, so they carry their own
+# tests here as well.
 
 on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - ".github/scripts/*.sh"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/**"
+      - ".github/scripts/*.sh"
 
 permissions:
   contents: read
@@ -62,3 +74,20 @@ jobs:
       # job fails loudly instead of silently degrading.
       - name: Run actionlint
         run: actionlint -color -shellcheck=shellcheck
+
+      # actionlint's `-shellcheck` only reaches shell inside `run:` blocks.
+      # The standalone scripts those blocks invoke need their own pass.
+      - name: Shellcheck the workflow support scripts
+        run: shellcheck .github/scripts/*.sh
+
+      # Shellcheck above is the only other gate on the conformance drift
+      # scripts, and it cannot see the way they break: a loosened id regex
+      # that drops cases, or a `diff` whose exit code stops being read, is
+      # valid shell. The result is a check that reports green while
+      # guarding nothing, on a weekly schedule where nobody is watching —
+      # and it would stay unnoticed until a real re-tightening slipped
+      # through, which is the failure that check exists to prevent. These
+      # controls pin the detection itself. They need neither the .NET SDK
+      # nor the catalog clone, so they run here.
+      - name: Test conformance-case-body-drift.sh
+        run: .github/scripts/conformance-case-body-drift.test.sh

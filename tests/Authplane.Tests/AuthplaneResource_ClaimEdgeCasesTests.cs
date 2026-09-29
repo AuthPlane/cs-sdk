@@ -55,6 +55,15 @@ public sealed class AuthplaneVerifierBranchCoverageTests : IDisposable
                         ctx.Response.ContentLength64 = bytes.Length;
                         await ctx.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
                     }
+                    else if (path == "/oauth/introspect")
+                    {
+                        // Always inactive: the tests that reach it are the revocation ones.
+                        var bytes = System.Text.Encoding.UTF8.GetBytes("{\"active\":false}");
+                        ctx.Response.StatusCode = 200;
+                        ctx.Response.ContentType = "application/json";
+                        ctx.Response.ContentLength64 = bytes.Length;
+                        await ctx.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+                    }
                     else
                     {
                         ctx.Response.StatusCode = 404;
@@ -134,6 +143,76 @@ public sealed class AuthplaneVerifierBranchCoverageTests : IDisposable
             expires: DateTimeOffset.UtcNow.AddMinutes(5).UtcDateTime);
 
         await Assert.ThrowsAsync<InvalidSignatureException>(() => verifier.VerifyAsync(token));
+    }
+
+    /// <summary>
+    /// The caller-visible message must not disclose the AS-to-resource-server trust state:
+    /// TokenRevokedException maps to 401 and the MCP middleware copies Message verbatim into
+    /// the WWW-Authenticate error_description and the response body.
+    /// </summary>
+    [Fact]
+    public async Task VerifyAsync_Revoked_ByIntrospection_KeepsOwnershipHintOffTheWire()
+    {
+        await using var authClient = new AuthplaneAuthClient(
+            issuerUrl: _issuer,
+            clientId: "rs_client", clientSecret: "rs_secret",
+            fetchSettings: FetchSettings.FromDevMode(true));
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(true),
+            revocationChecker: new IntrospectionRevocation(authClient));
+
+        var token = MintToken(
+            signingKey: _signingKey,
+            kid: _kid,
+            issuer: _issuer,
+            audience: _resource,
+            expires: DateTimeOffset.UtcNow.AddMinutes(5).UtcDateTime);
+
+        var ex = await Assert.ThrowsAsync<TokenRevokedException>(() => verifier.VerifyAsync(token));
+
+        Assert.DoesNotContain("introspection", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("recognise", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("has been revoked.", ex.Message, StringComparison.Ordinal);
+        // The operator half rides on the inner exception, which no response path reads.
+        Assert.NotNull(ex.InnerException);
+        Assert.Contains("introspection returned active=false", ex.InnerException!.Message, StringComparison.Ordinal);
+        Assert.Contains("runtime-client", ex.InnerException!.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A custom checker never calls introspection, so nothing in the failure may blame it.
+    /// </summary>
+    [Fact]
+    public async Task VerifyAsync_Revoked_ByCustomChecker_CarriesNoIntrospectionHint()
+    {
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(true),
+            revocationChecker: new AlwaysRevokedChecker());
+
+        var token = MintToken(
+            signingKey: _signingKey,
+            kid: _kid,
+            issuer: _issuer,
+            audience: _resource,
+            expires: DateTimeOffset.UtcNow.AddMinutes(5).UtcDateTime);
+
+        var ex = await Assert.ThrowsAsync<TokenRevokedException>(() => verifier.VerifyAsync(token));
+
+        Assert.EndsWith("has been revoked.", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("introspection", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ex.InnerException);
+    }
+
+    private sealed class AlwaysRevokedChecker : IRevocationChecker
+    {
+        public Task<bool> IsRevokedAsync(string token, CancellationToken cancellationToken = default)
+            => Task.FromResult(true);
     }
 
     private static string MintToken(

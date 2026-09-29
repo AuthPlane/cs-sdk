@@ -1,3 +1,4 @@
+using Authplane.Conformance;
 using Xunit;
 
 namespace Authplane.Tests;
@@ -7,7 +8,7 @@ namespace Authplane.Tests;
 /// matching RFC 9728 §1.2 definition of the resource identifier.
 ///
 /// Before this gate the fragment was silently dropped: the derived well-known
-/// URL is built from the authority plus <c>Uri.AbsolutePath</c>, which never
+/// URL was built from the authority plus <c>Uri.AbsolutePath</c>, which never
 /// carries a fragment, while the PRM <c>resource</c> field echoes the
 /// identifier verbatim. The served document therefore named a resource that
 /// differed from its own URL, and RFC 9728 §3.3 requires a conformant client to
@@ -16,11 +17,17 @@ namespace Authplane.Tests;
 /// </summary>
 public sealed class ResourceFragmentRejectionTests
 {
+    // The catalog case is the construction gate specifically: it is satisfied
+    // only by a rejection observable from the call that builds the resource,
+    // not by the fragment being dropped later while the well-known URL is
+    // derived. CreateAsync is that call, and the first row is the case's own
+    // setup value.
     [Theory]
     [InlineData("https://api.example.com/mcp#section")]
     [InlineData("https://api.example.com/mcp#")]
     [InlineData("https://api.example.com/#frag")]
     [InlineData("https://api.example.com#frag")]
+    [Conformance("rfc8707-resource-indicator-must-not-contain-a-fragment")]
     public async Task CreateAsync_FragmentInResource_Throws(string resource)
     {
         // No test server: the guard runs ahead of the issuer metadata fetch, so
@@ -69,9 +76,9 @@ public sealed class ResourceFragmentRejectionTests
     [Fact]
     public void FragmentRejection_MessageNamesTheOffendingIdentifier()
     {
-        // A process can host several resources against one AS, so paramName
-        // alone does not say which identifier failed. Parity with the sibling
-        // SDKs, all of which name something.
+        // The message names the offending identifier so the failure is
+        // attributable when one process hosts several resources against one AS
+        // — paramName alone does not say which one failed.
         var ex = Assert.Throws<ArgumentException>(() =>
             OAuthProtectedResourceMetadata.GetDocumentUrl("https://api.example.com/mcp#anchor-value"));
 

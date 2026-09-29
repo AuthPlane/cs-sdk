@@ -43,9 +43,12 @@ public sealed class ProtectedResourceMetadata
         //
         // The same argument carries every axis whose defect makes the derived
         // URL disagree with the emitted identifier, so all four run here. Only
-        // the query gate is excluded, and for a reason specific to it: a query
-        // is carried into the derived URL, so emitting one raises no mismatch
-        // for this type to prevent.
+        // the character-production gates are excluded — path, query and host —
+        // and for a reason specific to them: all three components are carried
+        // into the derived URL verbatim, so emitting them raises no mismatch
+        // for this type to prevent. What those gates protect is the derived URL
+        // being a URI a client can fetch, a property of the derivation this
+        // type does not perform.
         ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));

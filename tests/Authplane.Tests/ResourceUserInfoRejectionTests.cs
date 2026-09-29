@@ -15,10 +15,10 @@ public sealed class ResourceUserInfoRejectionTests
     [Theory]
     // Explicit credentials in an https identifier.
     [InlineData("https://svc:s3cr3t@api.example.com/mcp")]
-    // A scheme whose syntax fills the userinfo slot: mailto parses with
-    // UserInfo "ops" and Host "example.com", so it clears the absoluteness
-    // gate and must be stopped here.
-    [InlineData("mailto:ops@example.com")]
+    // The empty form, which Uri.UserInfo cannot distinguish from "no userinfo":
+    // RFC 9110 §4.2.4 forbids generating the subcomponent, not merely non-empty
+    // credentials.
+    [InlineData("https://@api.example.com/mcp")]
     public async Task CreateAsync_UserInfoInResource_Throws(string resource)
     {
         // No test server: the guard runs ahead of the issuer metadata fetch, so
@@ -46,6 +46,58 @@ public sealed class ResourceUserInfoRejectionTests
         Assert.Equal("resourceUrl", ex.ParamName);
         Assert.Contains("userinfo", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("RFC 9110", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The gate is scoped to the authority, because that is the only place RFC 3986
+    /// §3.2 puts a userinfo subcomponent. An opaque identifier has no authority, so
+    /// its '@' is data and this gate must not claim it — it is refused, but for the
+    /// reason it is actually refused for: no host, so no metadata URL derives from
+    /// it. The distinction is the whole value of the error message, which is what
+    /// tells the operator what to change.
+    /// </summary>
+    [Theory]
+    [InlineData("mailto:ops@example.com")]
+    [InlineData("urn:example:api")]
+    public async Task CreateAsync_OpaqueIdentifier_IsNotReportedAsUserInfo(string resource)
+    {
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            AuthplaneResource.CreateAsync(
+                issuer: "https://auth.example.com",
+                resource: resource,
+                scopes: new[] { "tools/add" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("userinfo", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("mailto:ops@example.com")]
+    [InlineData("urn:example:api")]
+    public void GetDocumentUrl_OpaqueIdentifier_IsNotReportedAsUserInfo(string resource)
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            OAuthProtectedResourceMetadata.GetDocumentUrl(resource));
+
+        Assert.Equal("resourceUrl", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("userinfo", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// An '@' outside the authority is data (RFC 3986 §§3.3, 3.4) and stays
+    /// accepted — the other half of scoping the gate. A guard that scanned the
+    /// whole string would turn these away.
+    /// </summary>
+    [Theory]
+    [InlineData("https://api.example.com/mcp/a@b")]
+    [InlineData("https://api.example.com/mcp?to=a@b")]
+    public void GetDocumentUrl_AtSignOutsideTheAuthority_StaysAccepted(string resource)
+    {
+        var ex = Record.Exception(() => OAuthProtectedResourceMetadata.GetDocumentUrl(resource));
+
+        Assert.Null(ex);
     }
 
     [Fact]

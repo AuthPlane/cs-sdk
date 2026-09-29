@@ -70,6 +70,24 @@ public class AuthplaneVerifierTests
     }
 
     [Fact]
+    public async Task CreateResourceAsync_InvalidPath_Throws()
+    {
+        // Same path as the fragment and query cases above, for the path gate:
+        // this is the one construction path that reaches the constructor
+        // without passing the early copy in CreateAsync, so it is where the
+        // constructor's gate is the only thing standing.
+        using var server = new OneShotJwksServer("{\"keys\":[]}");
+        await using var client = await AuthplaneClient.CreateAsync(
+            server.IssuerUrl, FetchSettings.FromDevMode(true));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await client.CreateResourceAsync("https://api.example.com/café", new[] { "read:data" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("path", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CreateResourceAsync_NonUrlResource_Rejected()
     {
         // A bare URN has a scheme but no host, so RFC 9728 §3 gives it no

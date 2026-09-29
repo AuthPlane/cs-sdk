@@ -21,6 +21,11 @@ public static class CircuitPolicy
         OAuthConstants.ErrorCodes.InvalidDPoPProof,
         OAuthConstants.ErrorCodes.InvalidRequest,
         OAuthConstants.ErrorCodes.UnsupportedGrantType,
+        // Exchange policy decisions, not AS health: the client is not on the
+        // Resource's exchange allow-list (403) or `resource` does not match a
+        // granted resource (400).
+        OAuthConstants.ErrorCodes.AccessDenied,
+        OAuthConstants.ErrorCodes.InvalidTarget,
     };
 
     /// <summary>

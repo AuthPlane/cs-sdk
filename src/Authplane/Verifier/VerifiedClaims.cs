@@ -101,7 +101,8 @@ public sealed class VerifiedClaims
     public string Act => Raw.TryGetValue("act", out var v) && v is IDictionary<string, object?> d
         && d.TryGetValue("sub", out var sub) ? sub?.ToString() ?? string.Empty : string.Empty;
 
-    /// <summary>RFC 8693 §4.2 authorized actor claim (<c>may_act.sub</c>), or empty if absent.</summary>
+    /// <summary>RFC 8693 §4.4 authorized actor claim (<c>may_act.sub</c>), or empty if absent.</summary>
+    [Obsolete("authserver 0.2.0 no longer issues may_act; removed in the next minor")]
     public string MayAct => Raw.TryGetValue("may_act", out var v) && v is IDictionary<string, object?> d
         && d.TryGetValue("sub", out var sub) ? sub?.ToString() ?? string.Empty : string.Empty;
 

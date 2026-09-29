@@ -178,7 +178,7 @@ var documentUrl = OAuthProtectedResourceMetadata.GetDocumentUrl(resourceUri);
 var json = resource.GetProtectedResourceMetadata().ToRfc9728Json();
 ```
 
-The `Authplane.Mcp` middleware serves this document publicly on `GET` before auth runs.
+The `Authplane.Mcp` middleware serves this document publicly on `GET` before auth runs, and advertises its URL in every challenge. A deployment whose document is hosted by the authorization server instead — authserver 0.2.0 serves one per registered Resource — points challenges at it with the adapter's `resourceMetadataUrl` option; either way RFC 9728 §3.3 requires the document's `resource` field to equal the URL clients call byte for byte.
 
 ### Token exchange (RFC 8693)
 
@@ -189,6 +189,20 @@ var exchanged = await auth.TokenExchangeAsync(new TokenExchangeOptions(
 ```
 
 When the AS surfaces `consent_required` / `interaction_required`, the call throws `ConsentRequiredException`. Adapters (e.g. `Authplane.Mcp`) translate that into framework-specific responses; see `UrlElicitationSupport` in the MCP adapter for the MCP `-32042` mapping.
+
+Two other rejections are policy decisions, not outages, and neither counts toward the circuit breaker:
+
+- `AccessDeniedException` (`access_denied`, HTTP 403) — a cross-client exchange where the operator has not allow-listed the exchanging client on the target Resource. Re-prompting the user will not fix it; this is different from `consent_required`.
+- `InvalidTargetException` (`invalid_target`, HTTP 400, RFC 8707 §2.2) — the `resource` value does not match a granted resource exactly, byte for byte (a trailing slash counts).
+
+**Operator step.** For each MCP server that exchanges for a downstream resource it does not itself act as, allow-list its client id on that Resource:
+
+```http
+PATCH /admin/resources/{id}
+{"policy": {"exchange": {"allowed_client_ids": ["<exchanging-client-id>"]}}}
+```
+
+A client exchanging a token issued to itself, fronted exchanges and Broker resources need nothing.
 
 ### Token revocation (RFC 7009)
 
@@ -209,6 +223,12 @@ var resource = await client.CreateResourceAsync(
 ```
 
 `failClosed: true` rejects tokens whenever the revocation check itself errors; default `false` allows the verification to succeed when the AS is unreachable.
+
+The `AuthplaneAuthClient` behind `IntrospectionRevocation` must be a confidential client **and** either the token's issuing client or a runtime-client of the Resource named in `aud`. Since authserver 0.1.2 anyone else gets `{"active": false}` — a public client cannot introspect at all — so a resource server introspecting with the wrong credentials silently rejects every token as revoked (`TokenRevokedException` names this cause). Register the resource server's client on the Resource:
+
+```sh
+authserver admin resource runtime-client add --client-id <rs-client-id> --slug <resource-slug>
+```
 
 ### JWKS resilience
 
@@ -234,6 +254,8 @@ Typical mapping for HTTP APIs:
 | `JwksFetchException`, `MetadataFetchException` | 502/503 | JWKS or discovery fetch failed. |
 | `AuthplaneTokenRequestException` | varies | Generic OAuth client-flow failure with `OAuthError` and `HttpStatus`. |
 | `ConsentRequiredException` | 403 | AS requires consent / URL elicitation. Translate via `UrlElicitationSupport` (MCP adapter). |
+| `AccessDeniedException` | 403 | Exchanging client not allow-listed on the target Resource; operator fix, not a consent prompt. |
+| `InvalidTargetException` | 400 | `resource` does not match a granted resource exactly (RFC 8707 §2.2). |
 | `CircuitOpenException` | 503 | Auth client circuit breaker is open. |
 
 ## 10. Lifecycle and disposal

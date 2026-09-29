@@ -62,6 +62,8 @@ public static class OAuthConstants
         public const string ServerError = "server_error";
         public const string UnsupportedGrantType = "unsupported_grant_type";
         public const string UnsupportedTokenType = "unsupported_token_type";
+        public const string AccessDenied = "access_denied";
+        public const string InvalidTarget = "invalid_target";
         public const string DPoPReplayDetected = "dpop_replay_detected";
         public const string DPoPBindingMismatch = "dpop_binding_mismatch";
         public const string DPoPProofMissing = "dpop_proof_missing";
