@@ -1,3 +1,4 @@
+using Authplane.Conformance;
 using Xunit;
 
 namespace Authplane.Tests;
@@ -21,10 +22,20 @@ namespace Authplane.Tests;
 /// </summary>
 public sealed class ResourceIdentifierAbsolutenessTests
 {
+    // The catalog case carries these two rows and requires each to reject on
+    // its own — a guard that only asks whether the identifier is
+    // authority-less would accept the scheme-relative form, so rejecting
+    // "/mcp" alone does not satisfy it.
+    //
+    // The opaque row lives in its own unmarked theory below. The case's note 4
+    // excludes it in as many words — "This case takes no position on it: ...
+    // its 'reject' outcome must not be read as covering the opaque case" — so
+    // carrying it under this marker is exactly the read the catalog forbids,
+    // even though this SDK does reject it.
     [Theory]
     [InlineData("/mcp")]                    // relative reference
     [InlineData("//api.example.com/mcp")]   // scheme-relative (network-path) reference
-    [InlineData("urn:example:api")]         // scheme but no host
+    [Conformance("rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host")]
     public async Task CreateAsync_NonAbsoluteUrlResource_Throws(string resource)
     {
         // No test server: the guard runs ahead of the issuer metadata fetch, so
@@ -37,6 +48,92 @@ public sealed class ResourceIdentifierAbsolutenessTests
 
         Assert.Equal("resource", ex.ParamName);
         Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The authority delimiter is required as written rather than inferred from
+    // `Uri.Host`, and this is the shape an operator produces by dropping a
+    // slash off an ordinary configuration. Unmarked: the catalog case's rows
+    // are the relative and scheme-relative references, and this is neither.
+    //
+    // Which branch of the gate turns it away is worth pinning rather than
+    // assuming. Measured on this runtime, `Uri.TryCreate` returns false for a
+    // scheme-only `https:` with no "//" — it does not fabricate an authority —
+    // so the parse clause rejects it and the explicit "//" requirement never
+    // gets a look at it. That requirement earns its place on the opaque
+    // identifiers that *do* parse with a host-shaped part after the ':'
+    // (`mailto:ops@example.com`), covered in ResourceUserInfoRejectionTests.
+    // If a future runtime starts fixing this shape up into an authority, the
+    // "//" clause catches it and this row keeps passing either way — which is
+    // the reason to have it.
+    [Theory]
+    [InlineData("https:api.example.com/mcp")]   // no "//" at all
+    [InlineData("https:/api.example.com/mcp")]  // one slash: a path, not an authority
+    [InlineData("http:api.example.com/mcp")]
+    public async Task CreateAsync_SpecialSchemeWithoutTheAuthorityDelimiter_Throws(string resource)
+    {
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            AuthplaneResource.CreateAsync(
+                issuer: "https://auth.example.com",
+                resource: resource,
+                scopes: new[] { "tools/add" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("https:api.example.com/mcp")]
+    [InlineData("https:/api.example.com/mcp")]
+    public void GetDocumentUrl_SpecialSchemeWithoutTheAuthorityDelimiter_Throws(string resource)
+    {
+        // The derivation is the half that would slice a phantom authority out
+        // of this, so it gets the row too.
+        var ex = Assert.Throws<ArgumentException>(() =>
+            OAuthProtectedResourceMetadata.GetDocumentUrl(resource));
+
+        Assert.Equal("resourceUrl", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Outside the catalog case, by that case's own note: an opaque identifier
+    // has a scheme but no host, and the SDKs have not settled whether to
+    // accept one for RFC 8707 audience binding. This SDK rejects it, and this
+    // is that behaviour of ours rather than a claim about the case.
+    [Theory]
+    [InlineData("urn:example:api")]
+    public async Task CreateAsync_OpaqueResource_Throws(string resource)
+    {
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            AuthplaneResource.CreateAsync(
+                issuer: "https://auth.example.com",
+                resource: resource,
+                scopes: new[] { "tools/add" }));
+
+        Assert.Equal("resource", ex.ParamName);
+        Assert.Contains("absolute URL", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The row the case *mandates*: note 3 makes accepting `http://localhost`
+    // a MUST — "an SDK is free to add a separate https policy ... but that is
+    // a different requirement" — so it belongs under the marker, and against
+    // the case's own `resource.create` stimulus rather than the path accessor.
+    [Fact]
+    [Conformance("rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host")]
+    public async Task CreateAsync_HttpLocalhost_IsAccepted()
+    {
+        // Reaches the metadata fetch, which is as far as this can go without a
+        // test server — the point is that the identifier gate does not reject
+        // it, so any failure past this must not be an ArgumentException naming
+        // `resource`.
+        var ex = await Record.ExceptionAsync(() =>
+            AuthplaneResource.CreateAsync(
+                issuer: "https://auth.example.com",
+                resource: "http://localhost:8080/mcp",
+                scopes: new[] { "tools/add" }));
+
+        Assert.False(
+            ex is ArgumentException { ParamName: "resource" },
+            $"the identifier gate rejected a row the case requires accepting: {ex?.Message}");
     }
 
     [Theory]
@@ -113,10 +210,11 @@ public sealed class ResourceIdentifierAbsolutenessTests
     public void GetDocumentUrl_WhitespaceOrBackslashInResource_Throws(string resource, string expectedInMessage)
     {
         // Pins the two rewrite shapes this axis closes — whitespace and the
-        // backslash — rejected before any derivation. Not the divergence class
-        // as a whole: `Uri` still canonicalizes a non-ASCII segment, a C0
-        // control and a malformed percent-escape, which the derivation's own
-        // comment records as a known limitation.
+        // backslash — rejected before any derivation. Its siblings resolve
+        // differently: a C0 control is rejected by the same gate with its own
+        // message, while a non-ASCII segment and a malformed percent-escape
+        // construct and derive byte-exact, pinned per-axis in
+        // OAuthProtectedResourceMetadataTests.
         var ex = Assert.Throws<ArgumentException>(() =>
             OAuthProtectedResourceMetadata.GetDocumentUrl(resource));
 
@@ -259,10 +357,12 @@ public sealed class ResourceIdentifierAbsolutenessTests
     }
 
     [Theory]
-    // A leading zero is legal RFC 3986 §3.2.3 syntax, and the derivation strips
-    // it — `:0080` emits verbatim and derives `:80`, which is the emit-vs-derive
-    // divergence this axis exists to make unconstructible. Not an RFC 3986 §6.2
-    // equivalence, unlike the normalizations the derivation is documented to apply.
+    // A leading zero is legal RFC 3986 §3.2.3 syntax and is rejected anyway:
+    // the derivation slices the authority verbatim, but stripping the zero is
+    // not an RFC 3986 §6.2 equivalence, and a client whose URL stack
+    // normalizes `:0080` to `:80` re-derives a document URL disagreeing with
+    // the served document's verbatim `resource` member — the mismatch this
+    // axis exists to make unconstructible, moved client-side.
     [InlineData("https://api.example.com:0080/mcp")]
     [InlineData("https://api.example.com:00/mcp")]
     [InlineData("https://[::1]:0080/mcp")]
@@ -275,8 +375,9 @@ public sealed class ResourceIdentifierAbsolutenessTests
     }
 
     [Theory]
-    // C0 controls and DEL: percent-encoded into the derived URL while the
-    // identifier is emitted verbatim, and not covered by char.IsWhiteSpace.
+    // C0 controls and DEL: no RFC 3986 production admits them, the byte-exact
+    // derivation would carry them verbatim into the advertised URL, and
+    // char.IsWhiteSpace does not cover them.
     [InlineData("https://api.example.com/a\u0001b")]
     [InlineData("https://api.example.com/a\u007Fb")]
     public void GetDocumentUrl_ControlCharacter_Throws(string resource)

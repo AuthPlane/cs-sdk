@@ -167,6 +167,17 @@ public sealed class DPoPNotSupportedException : DPoPException
     public DPoPNotSupportedException(string message) : base(message) { }
 }
 
+/// <summary>
+/// Raised when the revocation checker reports the token as revoked, or when
+/// the check itself failed under <c>failClosed</c>. With
+/// <see cref="IntrospectionRevocation"/>, <c>active=false</c> for a token
+/// that already passed local JWT verification usually means the AS did not
+/// recognise this resource server as the token's owner rather than a real
+/// revocation: authserver ≥ 0.1.2 answers <c>active=false</c> unless the
+/// introspecting client is the issuing client or a runtime-client of the
+/// Resource named in <c>aud</c>
+/// (<c>authserver admin resource runtime-client add --client-id &lt;rs-client-id&gt; --slug &lt;resource-slug&gt;</c>).
+/// </summary>
 public sealed class TokenRevokedException : AuthplaneException
 {
     public TokenRevokedException(string message) : base(message) { }
@@ -311,6 +322,33 @@ public sealed class ConsentRequiredException : AuthplaneTokenRequestException
 }
 
 /// <summary>
+/// Thrown when the AS refuses a token exchange with <c>access_denied</c>
+/// (HTTP 403): the exchanging client is not on the target Resource's exchange
+/// allow-list. Unlike <see cref="ConsentRequiredException"/>, no user
+/// interaction can satisfy it — the operator has to allow-list the client on
+/// the Resource. Not an AS outage; <see cref="CircuitPolicy"/> ignores it.
+/// </summary>
+public sealed class AccessDeniedException : AuthplaneTokenRequestException
+{
+    public AccessDeniedException(string message, int? httpStatus,
+        string? errorDescription = null, string? errorUri = null)
+        : base(message, OAuthConstants.ErrorCodes.AccessDenied, httpStatus, errorDescription, errorUri) { }
+}
+
+/// <summary>
+/// Thrown when the AS rejects the <c>resource</c> parameter with
+/// <c>invalid_target</c> (RFC 8707 §2.2): the value does not match a granted
+/// resource byte for byte (a trailing slash counts). Not an AS outage;
+/// <see cref="CircuitPolicy"/> ignores it.
+/// </summary>
+public sealed class InvalidTargetException : AuthplaneTokenRequestException
+{
+    public InvalidTargetException(string message, int? httpStatus,
+        string? errorDescription = null, string? errorUri = null)
+        : base(message, OAuthConstants.ErrorCodes.InvalidTarget, httpStatus, errorDescription, errorUri) { }
+}
+
+/// <summary>
 /// Wraps a malformed or unexpected token endpoint response body.
 /// Inherits from <see cref="AuthplaneAuthClientException"/> so callers can
 /// catch all AS-interaction failures as a single group.
@@ -362,21 +400,19 @@ public static class AuthplaneErrors
     /// <c>DPoP-Nonce</c> header is unsatisfiable (RFC 9449 §9).
     /// </summary>
     public static string WwwAuthenticate(AuthplaneException error, string realm = "")
+        => WwwAuthenticate(error, realm, verboseDescription: false);
+
+    /// <summary>
+    /// <see cref="WwwAuthenticate(AuthplaneException, string)"/> with
+    /// <paramref name="verboseDescription"/> restoring
+    /// <c>error.Message</c> in <c>error_description</c>, which is what this
+    /// helper emitted before the description became a fixed per-code sentence.
+    /// A development aid: the challenge reaches a caller who has not
+    /// authenticated, so do not enable it in production.
+    /// </summary>
+    public static string WwwAuthenticate(AuthplaneException error, string realm, bool verboseDescription)
     {
-        var errorCode = error switch
-        {
-            InsufficientScopeException => OAuthConstants.ErrorCodes.InsufficientScope,
-            // RFC 9449 §7.1 prescribes `invalid_dpop_proof` for §4.3
-            // cardinality rejections, and §9 prescribes `use_dpop_nonce`
-            // for nonce-policy rejections. This helper only builds the
-            // challenge value — the DPoP-Nonce response header the §9
-            // choreography also requires comes from ResponseHeaders, which
-            // the adapter (having the response in hand) must apply. The
-            // other DPoP failures keep `invalid_token`.
-            DPoPMultipleProofsException => OAuthConstants.ErrorCodes.InvalidDPoPProof,
-            DPoPNonceRequiredException => OAuthConstants.ErrorCodes.UseDpopNonce,
-            _ => OAuthConstants.ErrorCodes.InvalidToken,
-        };
+        var errorCode = ErrorCodeFor(error);
         // DPoPNotSupportedException is thrown by a resource that does NOT
         // accept DPoP — answering it with a `DPoP …` challenge would tell
         // the client to negotiate DPoP and have the next request rejected
@@ -392,8 +428,180 @@ public static class AuthplaneErrors
             parts.Add($"realm=\"{EscapeQuotedString(realm)}\"");
         }
         parts.Add($"error=\"{errorCode}\"");
-        parts.Add($"error_description=\"{EscapeQuotedString(error.Message)}\"");
+        parts.Add($"error_description=\"{EscapeQuotedString(ErrorDescription(errorCode, error, verboseDescription))}\"");
         return $"{scheme} " + string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// The RFC 6750 §3.1 / RFC 9449 §7.1 error code this exception is answered
+    /// with. Shared by <see cref="WwwAuthenticate(AuthplaneException, string)"/>
+    /// and <see cref="ErrorResponseBody"/> so the challenge and the body that
+    /// travel in the same response can never name different codes.
+    /// </summary>
+    public static string ErrorCodeFor(AuthplaneException error) => error switch
+    {
+        InsufficientScopeException => OAuthConstants.ErrorCodes.InsufficientScope,
+        // RFC 9449 §7.1 prescribes `invalid_dpop_proof` for §4.3
+        // cardinality rejections, and §9 prescribes `use_dpop_nonce`
+        // for nonce-policy rejections. The challenge builder only produces
+        // the header value — the DPoP-Nonce response header the §9
+        // choreography also requires comes from ResponseHeaders, which
+        // the adapter (having the response in hand) must apply. The
+        // other DPoP failures keep `invalid_token`.
+        DPoPMultipleProofsException => OAuthConstants.ErrorCodes.InvalidDPoPProof,
+        DPoPNonceRequiredException => OAuthConstants.ErrorCodes.UseDpopNonce,
+        _ => OAuthConstants.ErrorCodes.InvalidToken,
+    };
+
+    /// <summary>
+    /// The <c>error_description</c> emitted for an error code.
+    ///
+    /// Both the challenge and the JSON body are served to a caller who by
+    /// definition has not authenticated, so the description is built from the
+    /// error code and never from the exception's own message. The SDK's
+    /// messages name the failing detail — the unknown <c>kid</c>, the claim
+    /// that did not validate, the <c>typ</c> that was rejected — and an
+    /// audience mismatch in particular would hand the caller the exact
+    /// <c>aud</c> the resource expects, which is the value they need in order
+    /// to request a token for it. RFC 6750 §3 does not require
+    /// <c>error_description</c> to be diagnostic: the error code already
+    /// carries everything a conforming client needs in order to decide what to
+    /// do next.
+    ///
+    /// The descriptions carry no comma, so the same text stays safe to emit as
+    /// a WWW-Authenticate quoted-string, where a comma separates challenge
+    /// parameters and is what a lenient client-side parser splits on.
+    /// </summary>
+    private static readonly System.Collections.Generic.Dictionary<string, string> SafeErrorDescriptions = new()
+    {
+        [OAuthConstants.ErrorCodes.InvalidToken] = "The access token is missing or not valid for this resource",
+        [OAuthConstants.ErrorCodes.InsufficientScope] = "The access token does not carry the scope this operation requires",
+        [OAuthConstants.ErrorCodes.InvalidDPoPProof] = "The DPoP proof is missing or not valid for this request",
+        // The 5xx case, where the server side is at fault. Same text
+        // @authplane/mcp emits on its own 500 fallback, so a caller reading
+        // two SDKs of this family reads one sentence.
+        [ServerErrorCode] = "Internal Server Error",
+        // A 503 is the authorization server being unreachable from here — not
+        // this resource server failing — so the caller reads a transient
+        // condition rather than a defect it might report.
+        [TemporarilyUnavailableCode] = "The authorization server cannot be reached from this resource server",
+    };
+
+    /// <summary>
+    /// Covers an error code with no entry in <c>SafeErrorDescriptions</c> — any
+    /// code added without a matching row, and today <c>use_dpop_nonce</c>, which
+    /// no sibling SDK carries a row for. Kept deliberately contentless for the
+    /// same reason the table exists.
+    /// </summary>
+    public const string FallbackErrorDescription = "The request could not be authenticated";
+
+    /// <summary>
+    /// The <c>error_description</c> for a request that presented no
+    /// credentials at all. This case carries no <c>error</c>: RFC 6750 §3.1
+    /// reserves the error codes for a request that did authenticate and
+    /// failed, and ties <c>invalid_request</c> to a malformed request answered
+    /// with 400 — a plain "please authenticate" 401 is neither. §3 accordingly
+    /// has the challenge omit <c>error</c>, and
+    /// <see cref="ErrorResponseBody"/>'s no-argument form omits it from the
+    /// body for the same reason, so the two halves still agree.
+    ///
+    /// Use that no-argument form only when composing a response without an
+    /// exception in hand: <see cref="WwwAuthenticate(AuthplaneException, string)"/>
+    /// always emits an <c>error</c> parameter, and a
+    /// <c>TokenMissingException</c> passed to it reaches
+    /// <see cref="ErrorCodeFor"/>'s <c>invalid_token</c> fallthrough. An adapter
+    /// holding the exception should key both halves off
+    /// <c>ErrorCodeFor(ex)</c> so they cannot name different codes.
+    /// </summary>
+    public const string MissingCredentialsDescription =
+        "The request did not carry a usable access token";
+
+    /// <summary>
+    /// RFC 6749 §5.2 <c>server_error</c> — the body's <c>error</c> when the
+    /// failure is the server's, not the caller's credentials'. No challenge
+    /// accompanies it: telling a client to fix credentials that are not the
+    /// problem would send it round a loop it cannot exit.
+    /// </summary>
+    public const string ServerErrorCode = "server_error";
+
+    /// <summary>
+    /// RFC 6749 §5.2 <c>temporarily_unavailable</c> — the body's <c>error</c>
+    /// when the failure is a 503. <c>server_error</c> reads as a fault in this
+    /// resource server; a 503 here is the authorization server being
+    /// unreachable, which is transient and worth retrying, and the two are
+    /// worth telling apart in a client's logs. Only <see cref="JwksFetchException"/>
+    /// and <see cref="MetadataFetchException"/> reach it: a
+    /// <c>CircuitOpenException</c> is 500 by the default arm of
+    /// <see cref="HttpStatus"/>, deliberately.
+    /// </summary>
+    public const string TemporarilyUnavailableCode = "temporarily_unavailable";
+
+    /// <summary>
+    /// The body's <c>error</c> for a server-side failure, chosen by the status
+    /// <see cref="HttpStatus"/> produced. Keyed off the status rather than the
+    /// exception type so the code and the status cannot drift apart.
+    /// </summary>
+    public static string ServerErrorCodeFor(int httpStatus) =>
+        httpStatus == 503 ? TemporarilyUnavailableCode : ServerErrorCode;
+
+    /// <summary>
+    /// The fixed, caller-safe <c>error_description</c> for an error code,
+    /// for adapters that compose a challenge from a code they already know
+    /// rather than from an exception.
+    /// </summary>
+    public static string ErrorDescriptionFor(string? errorCode)
+        => string.IsNullOrEmpty(errorCode)
+            ? MissingCredentialsDescription
+            : ErrorDescription(errorCode, null, false);
+
+    private static string ErrorDescription(string? errorCode, AuthplaneException? error, bool verbose)
+    {
+        if (verbose && error is not null)
+        {
+            return error.Message;
+        }
+
+        // Dictionary.TryGetValue throws on a null key; the fallback's contract is
+        // "any code with no matching row", which a caller holding none is.
+        return errorCode is not null && SafeErrorDescriptions.TryGetValue(errorCode, out var description)
+            ? description
+            : FallbackErrorDescription;
+    }
+
+    /// <summary>
+    /// Build the RFC 6750 §3 JSON error body served alongside the challenge.
+    ///
+    /// Pass <paramref name="errorCode"/> <c>null</c> or empty for a request
+    /// that presented no credentials: the body then carries
+    /// <see cref="MissingCredentialsDescription"/> and <b>no</b> <c>error</c>
+    /// member, matching the challenge that omits <c>error</c> for the same
+    /// case. A client branching on <c>error</c> should read its absence as
+    /// "authenticate", which is what the challenge already says.
+    ///
+    /// <paramref name="error"/> is used only by
+    /// <paramref name="verboseDescription"/>, the development-only escape
+    /// hatch that puts the exception's message back on the wire.
+    /// </summary>
+    public static string ErrorResponseBody(
+        string? errorCode = null,
+        AuthplaneException? error = null,
+        bool verboseDescription = false)
+    {
+        // Serialized rather than string-interpolated: the verbose form puts
+        // error.Message back on the wire, and the verifier interpolates
+        // token-controlled header values into those messages, so the body has
+        // to be escaped by something that knows the JSON rules (RFC 8259 §7).
+        var body = new System.Collections.Generic.Dictionary<string, string>();
+        if (!string.IsNullOrEmpty(errorCode))
+        {
+            body["error"] = errorCode;
+        }
+
+        body["error_description"] = string.IsNullOrEmpty(errorCode)
+            ? (verboseDescription && error is not null ? error.Message : MissingCredentialsDescription)
+            : ErrorDescription(errorCode, error, verboseDescription);
+
+        return System.Text.Json.JsonSerializer.Serialize(body);
     }
 
     /// <summary>
@@ -440,7 +648,7 @@ public static class AuthplaneErrors
 
     /// <summary>
     /// Map an <see cref="AuthplaneException"/> to an HTTP status code.
-    /// Pair with <see cref="WwwAuthenticate"/> and
+    /// Pair with <see cref="WwwAuthenticate(AuthplaneException, string)"/> and
     /// <see cref="ResponseHeaders"/> when building an error response.
     /// </summary>
     public static int HttpStatus(AuthplaneException error) => error switch
@@ -464,7 +672,7 @@ public static class AuthplaneErrors
 
     /// <summary>
     /// Extra response headers a correct error response must carry alongside
-    /// the <see cref="HttpStatus"/> code and <see cref="WwwAuthenticate"/>
+    /// the <see cref="HttpStatus"/> code and <see cref="WwwAuthenticate(AuthplaneException, string)"/>
     /// challenge. Today the only entry is <c>DPoP-Nonce</c> for
     /// <see cref="DPoPNonceRequiredException"/>: RFC 9449 §9 requires the
     /// fresh nonce on the <c>use_dpop_nonce</c> 401, and without it a
@@ -561,6 +769,8 @@ public static class AuthplaneErrors
             OAuthConstants.ErrorCodes.InvalidScope => new InvalidScopeException(defaultMessage, httpStatus, errorDescription, errorUri),
             OAuthConstants.ErrorCodes.InvalidRequest => new InvalidRequestException(defaultMessage, httpStatus, errorDescription, errorUri),
             OAuthConstants.ErrorCodes.UnsupportedGrantType => new UnsupportedGrantTypeException(defaultMessage, httpStatus, errorDescription, errorUri),
+            OAuthConstants.ErrorCodes.AccessDenied => new AccessDeniedException(defaultMessage, httpStatus, errorDescription, errorUri),
+            OAuthConstants.ErrorCodes.InvalidTarget => new InvalidTargetException(defaultMessage, httpStatus, errorDescription, errorUri),
             _ => new AuthplaneTokenRequestException(defaultMessage, oauthError, httpStatus, errorDescription, errorUri),
         };
     }

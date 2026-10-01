@@ -5,14 +5,18 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
 
 namespace Authplane.Mcp.Tests;
 
-public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
+public sealed class AuthplaneMcpAuthMiddlewareTests
+    : IClassFixture<KestrelPathGroundTruth>, IDisposable
 {
+    private readonly KestrelPathGroundTruth _kestrel;
     private readonly HttpListener _listener;
     private readonly int _port;
     private readonly string _issuer;
@@ -20,8 +24,9 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
     private readonly string _kid;
     private readonly ECDsa _ecdsa;
 
-    public AuthplaneMcpAuthMiddlewareTests()
+    public AuthplaneMcpAuthMiddlewareTests(KestrelPathGroundTruth kestrel)
     {
+        _kestrel = kestrel;
         _ecdsa = Ecdsa.GenerateP256();
         (_issuer, _listener) = LoopbackHttpListener.Start();
         _port = new Uri(_issuer).Port;
@@ -108,6 +113,108 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
     {
         var verifier = await CreateResourceAsync(
             tokenScopes: new[] { "tools/add" });
+
+        var accessToken = MintAccessToken(
+            issuer: _issuer,
+            audience: _resource,
+            ecdsa: _ecdsa,
+            kid: _kid,
+            cnfJkt: "test-jkt",
+            scope: "tools/add");
+
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add", "tools/multiply" },
+            devMode: true);
+
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokeAsync(
+            requestDelegate,
+            provider,
+            token: accessToken,
+            authScheme: "Bearer",
+            dpopHeader: null,
+            mcpToolCallName: "add");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rejection_LogsTheCause_WhileTheBodyKeepsTheFixedDescription()
+    {
+        // The body and challenge deliberately withhold the exception's own
+        // message. The operator still needs it, and this middleware is the
+        // last place that holds it, so it goes to the log instead of the wire
+        // — the two halves of the same decision.
+        //
+        // Debug, not Warning: reaching a rejection takes no credentials, so
+        // logging every one higher would let an unauthenticated caller choose
+        // this server's log volume.
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
+
+        var accessToken = MintAccessToken(
+            issuer: _issuer,
+            audience: _resource,
+            ecdsa: _ecdsa,
+            kid: _kid,
+            cnfJkt: "test-jkt",
+            scope: "tools/add");
+
+        var loggerFactory = new CapturingLoggerFactory(LogLevel.Debug);
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        services.AddSingleton<ILoggerFactory>(loggerFactory);
+        var provider = services.BuildServiceProvider();
+
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add", "tools/multiply" },
+            devMode: true);
+
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokeAsync(
+            requestDelegate,
+            provider,
+            token: accessToken,
+            authScheme: "Bearer",
+            dpopHeader: null,
+            mcpToolCallName: "add");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+
+        var record = Assert.Single(loggerFactory.Records);
+        Assert.Equal(LogLevel.Debug, record.Level);
+        Assert.NotNull(record.Exception);
+        Assert.IsAssignableFrom<AuthplaneException>(record.Exception);
+        Assert.Equal("Authplane.Mcp", loggerFactory.Category);
+
+        // The message the log now carries is the one the response must not.
+        ctx.Response.Body.Position = 0;
+        using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        Assert.DoesNotContain(record.Exception!.Message, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            record.Exception!.Message,
+            ctx.Response.Headers.WWWAuthenticate.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Rejection_WithNoLoggerFactoryRegistered_StillAnswers()
+    {
+        // Logging is optional. A host that registers none gets null from
+        // GetService<ILoggerFactory>, and the call has to be a no-op rather
+        // than a NullReferenceException on the rejection path — where it
+        // would turn every 401 into a 500.
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
 
         var accessToken = MintAccessToken(
             issuer: _issuer,
@@ -427,6 +534,229 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
     }
 
     [Fact]
+    public async Task PrmDocument_IsServedAtTheAdvertisedUrl()
+    {
+        // The one request a client that just read `resource_metadata` will
+        // perform: a GET of the derived document URL, verbatim. Driven
+        // through the middleware end to end, with the request shaped the way
+        // a real server delivers it — encoded bytes in
+        // IHttpRequestFeature.RawTarget, decoded path in Request.Path.
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var documentUrl = verifier.GetProtectedResourceMetadataDocumentUrl();
+        Assert.Equal("http://localhost:8080/.well-known/oauth-protected-resource/mcp", documentUrl);
+
+        var ctx = await InvokeAdvertisedDocumentUrlGetAsync(requestDelegate, provider, documentUrl);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        ctx.Response.Body.Position = 0;
+        using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal(_resource, doc.RootElement.GetProperty("resource").GetString());
+    }
+
+    [Fact]
+    public async Task PrmDocument_IsServedAtTheAdvertisedUrl_WhenPathCarriesAPreservedPercentEncoding()
+    {
+        // The %7E row: the derivation preserves the percent-encoding
+        // byte-exact, so the advertised URL carries `%7E` while the decoded
+        // request path carries `~`. Routing compares the encoded request
+        // target against the path sliced off the derived URL, so the URL the
+        // challenge advertises is the URL that answers — previously the
+        // expected path was re-parsed through Uri.AbsolutePath (which
+        // unescapes `%7E`) and compared against the decoded request path,
+        // which happened to serve this row only by double-decoding.
+        var resource = "http://localhost:8080/m%7Ecp";
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(devMode: true));
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var documentUrl = verifier.GetProtectedResourceMetadataDocumentUrl();
+        Assert.Equal("http://localhost:8080/.well-known/oauth-protected-resource/m%7Ecp", documentUrl);
+
+        var ctx = await InvokeAdvertisedDocumentUrlGetAsync(requestDelegate, provider, documentUrl);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        ctx.Response.Body.Position = 0;
+        using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal(resource, doc.RootElement.GetProperty("resource").GetString());
+    }
+
+    [Fact]
+    public async Task PrmDocument_IsServedAtTheAdvertisedUrl_WhenPathCarriesAPercentEncodedSlash()
+    {
+        // The %2F row — the one escape where Kestrel's path decoder and
+        // Uri.UnescapeDataString disagree. Kestrel leaves %2F encoded in
+        // Request.Path (decoding it would change segment structure), so a
+        // fallback that unescaped the expected path with UnescapeDataString
+        // compared `…/mcp/` (trimmed to `…/mcp`) against a request path still
+        // carrying `…/mcp%2F`: the identifier's own advertised URL answered
+        // 401 on hosts without RawTarget, and the URL a different, %2F-less
+        // identifier advertises falsely matched — serving a document whose
+        // `resource` member says `/mcp%2F` to a client that derived `/mcp`,
+        // the exact RFC 9728 §3.3 mismatch this routing exists to avoid.
+        var resource = "http://localhost:8080/mcp%2F";
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(devMode: true));
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var documentUrl = verifier.GetProtectedResourceMetadataDocumentUrl();
+        Assert.Equal("http://localhost:8080/.well-known/oauth-protected-resource/mcp%2F", documentUrl);
+
+        // Served at its own advertised URL — both on a host exposing the raw
+        // request target (primary comparison) and on one that does not
+        // (decoded fallback).
+        foreach (var populateRawTarget in new[] { true, false })
+        {
+            var ctx = await InvokeAdvertisedDocumentUrlGetAsync(
+                requestDelegate, provider, documentUrl, populateRawTarget);
+
+            Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+            ctx.Response.Body.Position = 0;
+            using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+            var body = await reader.ReadToEndAsync();
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(resource, doc.RootElement.GetProperty("resource").GetString());
+        }
+
+        // And NOT at the URL a different identifier (`…/mcp`) advertises:
+        // that request must fall through to auth, not receive a document
+        // whose `resource` member disagrees with the URL it was fetched from.
+        var other = await InvokeAdvertisedDocumentUrlGetAsync(
+            requestDelegate,
+            provider,
+            "http://localhost:8080/.well-known/oauth-protected-resource/mcp");
+        Assert.Equal(StatusCodes.Status401Unauthorized, other.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Kestrel_DecodesEveryEscapeExceptPercent2F_Measured()
+    {
+        // The observed behaviour every decoded-path assertion in this file
+        // rests on, and the only place it is stated as a measurement rather
+        // than assumed: a real Kestrel bound to a loopback port, handed the
+        // literal bytes of a request line over a socket, echoing back the
+        // Request.Path it produced. Pinned here so a runtime that changes
+        // this fails one obvious test instead of a scattering of routing
+        // ones — and so the SDK's model of the decoder
+        // (DecodePathLikeKestrel) has something to be wrong against.
+
+        // %2F stays encoded: decoding it would add a segment boundary the
+        // client did not send. Byte-exact, so the client's hex casing
+        // survives — which is why the path comparison folds case.
+        Assert.Equal("/mcp%2F", await _kestrel.DecodePathAsync("/mcp%2F"));
+        Assert.Equal("/mcp%2f", await _kestrel.DecodePathAsync("/mcp%2f"));
+
+        // %5C does NOT stay encoded — Kestrel decodes it to a backslash like
+        // any other escape. The SDK's decoder used to hold it back, and its
+        // doc comment asserted this behaviour rather than measuring it; the
+        // last row shows the two escapes really are treated differently
+        // side by side, so holding %5C back was never a spelling variant of
+        // the %2F rule.
+        Assert.Equal("/m\\cp", await _kestrel.DecodePathAsync("/m%5Ccp"));
+        Assert.Equal("/m\\cp", await _kestrel.DecodePathAsync("/m%5ccp"));
+        Assert.Equal("/a\\b%2Fc~d", await _kestrel.DecodePathAsync("/a%5Cb%2Fc%7Ed"));
+
+        // Everything else decodes, including the escapes that would otherwise
+        // look structural: %25 is not re-scanned as the start of an escape.
+        Assert.Equal("/m~cp", await _kestrel.DecodePathAsync("/m%7Ecp"));
+        Assert.Equal("/m cp", await _kestrel.DecodePathAsync("/m%20cp"));
+        Assert.Equal("/m%cp", await _kestrel.DecodePathAsync("/m%25cp"));
+    }
+
+    [Fact]
+    public async Task PrmDocument_IsServedAtTheAdvertisedUrl_WhenPathCarriesAPercentEncodedBackslash()
+    {
+        // The %5C row. `ThrowIfWhitespaceOrBackslash` rejects a raw backslash
+        // in a resource identifier, but `%5C` is a well-formed escape that
+        // the path validator's `%` branch steps over — so this identifier
+        // constructs, and derives a document URL that keeps the escape.
+        //
+        // Kestrel decodes `%5C` (see the ground-truth test above), so on
+        // the fallback branch `Request.Path` carries `m\cp`. A decoder that
+        // preserved `%5C` on the expected side would leave the two spellings
+        // unequal and answer 401 at the identifier's own advertised URL —
+        // the %2F defect above with the sign flipped. The row exists so that
+        // branch executes.
+        var resource = "http://localhost:8080/m%5Ccp";
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(devMode: true));
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: resource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var documentUrl = verifier.GetProtectedResourceMetadataDocumentUrl();
+        Assert.Equal("http://localhost:8080/.well-known/oauth-protected-resource/m%5Ccp", documentUrl);
+
+        // Served at its own advertised URL both on a host exposing the raw
+        // request target (primary comparison) and on one that does not
+        // (decoded fallback) — the fallback is the branch under test.
+        foreach (var populateRawTarget in new[] { true, false })
+        {
+            var ctx = await InvokeAdvertisedDocumentUrlGetAsync(
+                requestDelegate, provider, documentUrl, populateRawTarget);
+
+            Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+            ctx.Response.Body.Position = 0;
+            using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+            var body = await reader.ReadToEndAsync();
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(resource, doc.RootElement.GetProperty("resource").GetString());
+        }
+
+        // And not at the URL a different, escape-less identifier advertises:
+        // decoding `%5C` must not collapse two identifiers onto one document.
+        var other = await InvokeAdvertisedDocumentUrlGetAsync(
+            requestDelegate,
+            provider,
+            "http://localhost:8080/.well-known/oauth-protected-resource/mcp");
+        Assert.Equal(StatusCodes.Status401Unauthorized, other.Response.StatusCode);
+    }
+
+    [Fact]
     public async Task ResourceWithQuery_ChallengeAdvertisesQuery_AndPrmRouteStaysPathKeyed()
     {
         // RFC 9728 §3 — the well-known string goes "between the host component
@@ -519,6 +849,122 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
             "http://localhost:8080/.well-known/oauth-protected-resource/mcp",
             www,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// RFC 9728 §5.1 leaves the PRM document's location to the deployment: it
+    /// is the URL the challenge names, not a path the resource must serve
+    /// itself. authserver 0.2.0 publishes one document per registered Resource
+    /// at <c>{issuer}/.well-known/oauth-protected-resource/{ref}</c>, which a
+    /// resource server that cannot host well-known paths of its own points at
+    /// instead. The test above pins the default — the derived resource-hosted
+    /// URL — so the two together show the option changes that and nothing else.
+    /// </summary>
+    [Fact]
+    public async Task ResourceMetadataUrlOverride_IsAdvertisedOn401()
+    {
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var asHostedUrl = $"{_issuer}/.well-known/oauth-protected-resource/mcp";
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            devMode: true,
+            resourceMetadataUrl: asHostedUrl);
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokeRawAsync(
+            requestDelegate,
+            provider,
+            authorizationHeader: null,
+            bodyJson: "{\"method\":\"tools/call\",\"params\":{\"name\":\"add\"}}");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        Assert.Contains($"resource_metadata=\"{asHostedUrl}\"", www, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "http://localhost:8080/.well-known/oauth-protected-resource/mcp",
+            www,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResourceMetadataUrlOverride_IsAdvertisedOnInsufficientScope403()
+    {
+        // The 403 matters as much as the 401: a client that only ever presents
+        // an under-scoped token reaches the AS through this challenge alone.
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
+
+        var accessToken = MintAccessToken(
+            issuer: _issuer,
+            audience: _resource,
+            ecdsa: _ecdsa,
+            kid: _kid,
+            cnfJkt: null,
+            scope: "tools/add");
+
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+
+        var asHostedUrl = $"{_issuer}/.well-known/oauth-protected-resource/mcp";
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add", "tools/multiply" },
+            devMode: true,
+            resourceMetadataUrl: asHostedUrl);
+
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokeAsync(
+            requestDelegate,
+            provider,
+            token: accessToken,
+            authScheme: "Bearer",
+            dpopHeader: null,
+            mcpToolCallName: "multiply");
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        Assert.Contains("error=\"insufficient_scope\"", www, StringComparison.Ordinal);
+        Assert.Contains($"resource_metadata=\"{asHostedUrl}\"", www, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResourceMetadataUrlOverride_LeavesThePrmDocumentRouteOnTheDerivedUrl()
+    {
+        // The override redirects discovery, not hosting: the well-known path
+        // this middleware answers is derived from the resource identifier and
+        // has nothing to do with where the advertised document lives. Keying
+        // the route off the override would take the resource-hosted document
+        // offline the moment an operator pointed clients at the AS-hosted one,
+        // which is a migration step nobody asked for.
+        var verifier = await CreateResourceAsync(tokenScopes: new[] { "tools/add" });
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            devMode: true,
+            resourceMetadataUrl: $"{_issuer}/.well-known/oauth-protected-resource/mcp");
+        var requestDelegate = BuildPipeline(provider, options);
+
+        var ctx = await InvokePrmDocumentGetAsync(requestDelegate, provider);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        ctx.Response.Body.Position = 0;
+        using var reader = new System.IO.StreamReader(ctx.Response.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        using var doc = JsonDocument.Parse(body);
+        // RFC 9728 §3.3 — whichever document a client ends up reading, its
+        // `resource` must equal the identifier byte for byte.
+        Assert.Equal(_resource, doc.RootElement.GetProperty("resource").GetString());
     }
 
     [Fact]
@@ -1224,6 +1670,163 @@ public sealed class AuthplaneMcpAuthMiddlewareTests : IDisposable
 
         await requestDelegate(ctx).ConfigureAwait(false);
         return ctx;
+    }
+
+    /// <summary>
+    /// GET the advertised PRM document URL through the middleware, shaping
+    /// the request the way a real server delivers it: the encoded bytes of
+    /// the request line in <see cref="IHttpRequestFeature.RawTarget"/>
+    /// (unless <paramref name="populateRawTarget"/> is false, modelling a
+    /// host that does not expose the raw target), and in <c>Request.Path</c>
+    /// the decoded path a real Kestrel actually produces for those bytes,
+    /// measured by <see cref="KestrelPathGroundTruth"/>.
+    /// </summary>
+    /// <remarks>
+    /// The decoded side is measured rather than modelled on purpose. The
+    /// middleware's fallback branch compares <c>Request.Path</c> against the
+    /// expected path put through the SDK's own model of Kestrel's decoder; a
+    /// second copy of that model on the request-shaping side would reduce the
+    /// assertion to <c>PathsMatch(f(p), f(p))</c> — true whatever <c>f</c>
+    /// does, so a model that disagrees with Kestrel would still pass green.
+    /// It did: the model claimed Kestrel preserves <c>%5C</c>, and Kestrel
+    /// decodes it. See
+    /// <see cref="Kestrel_DecodesEveryEscapeExceptPercent2F_Measured"/>.
+    /// </remarks>
+    private async Task<HttpContext> InvokeAdvertisedDocumentUrlGetAsync(
+        RequestDelegate requestDelegate,
+        ServiceProvider provider,
+        string documentUrl,
+        bool populateRawTarget = true)
+    {
+        var target = documentUrl[documentUrl.IndexOf("/.well-known/", StringComparison.Ordinal)..];
+        var queryStart = target.IndexOf('?', StringComparison.Ordinal);
+        var rawPath = queryStart >= 0 ? target[..queryStart] : target;
+
+        var ctx = new DefaultHttpContext();
+        ctx.RequestServices = provider;
+        ctx.Request.Scheme = "http";
+        ctx.Request.Host = new HostString("localhost", 8080);
+        ctx.Request.PathBase = PathString.Empty;
+        ctx.Request.Path = new PathString(await _kestrel.DecodePathAsync(rawPath).ConfigureAwait(false));
+        ctx.Request.QueryString = queryStart >= 0 ? new QueryString(target[queryStart..]) : QueryString.Empty;
+        if (populateRawTarget)
+        {
+            ctx.Features.Get<IHttpRequestFeature>()!.RawTarget = target;
+        }
+
+        ctx.Request.Method = HttpMethods.Get;
+        ctx.Response.Body = new System.IO.MemoryStream();
+
+        await requestDelegate(ctx).ConfigureAwait(false);
+        return ctx;
+    }
+
+    // -----------------------------------------------------------------------
+    // Error bodies: RFC 6750 §3 JSON, fixed description, no message
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task NoCredentials_Returns401_WithNoErrorCodeInEitherHalf()
+    {
+        // A request that presented nothing gets no `error` in the challenge
+        // (RFC 6750 §3.1 defines the codes for a request that did present
+        // credentials, and ties `invalid_request` to a malformed request
+        // answered with 400), and the body makes the same omission rather than
+        // inventing a code the header does not carry.
+        var (ctx, _) = await InvokeUnauthenticatedAsync(authorizationHeader: null);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", ctx.Response.ContentType);
+
+        var (error, description) = ReadErrorBody(ctx);
+        Assert.Null(error);
+        Assert.Equal("The request did not carry a usable access token", description);
+
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        Assert.DoesNotContain("error=", www, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UnknownScheme_Returns401_WithNoErrorCodeInEitherHalf()
+    {
+        var (ctx, _) = await InvokeUnauthenticatedAsync(authorizationHeader: "Basic abc");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        var (error, description) = ReadErrorBody(ctx);
+        Assert.Null(error);
+        Assert.Equal("The request did not carry a usable access token", description);
+
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        Assert.DoesNotContain("error=", www, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RejectedToken_Returns401_WithFixedDescriptionAndNoInternalMessage()
+    {
+        // The body used to be `invalid_token: {ex.Message}` — the verifier's
+        // own sentence, naming the unknown kid or the claim that failed, to a
+        // caller who by definition has not authenticated. Both halves of the
+        // response now carry the per-code sentence instead.
+        var (ctx, _) = await InvokeUnauthenticatedAsync(
+            authorizationHeader: "Bearer not-a-real-token");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", ctx.Response.ContentType);
+
+        var (error, description) = ReadErrorBody(ctx);
+        Assert.Equal("invalid_token", error);
+        Assert.Equal(
+            "The access token is missing or not valid for this resource",
+            description);
+
+        // Neither half leaks: no JWT/claim vocabulary in either.
+        var www = ctx.Response.Headers.WWWAuthenticate.ToString();
+        foreach (var leak in new[] { "kid", "claim", "signature", "token-", "JWT" })
+        {
+            Assert.DoesNotContain(leak, description, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(leak, www, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private async Task<(HttpContext Context, ServiceProvider Provider)> InvokeUnauthenticatedAsync(
+        string? authorizationHeader)
+    {
+        var verifier = await AuthplaneResource.CreateAsync(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            fetchSettings: FetchSettings.FromDevMode(devMode: true));
+
+        var services = new ServiceCollection();
+        services.AddSingleton(verifier);
+        var provider = services.BuildServiceProvider();
+
+        var options = new AuthplaneMcpAuth.Options(
+            issuer: _issuer,
+            resource: _resource,
+            scopes: new[] { "tools/add" },
+            devMode: true);
+
+        var ctx = await InvokeRawAsync(
+            BuildPipeline(provider, options),
+            provider,
+            authorizationHeader,
+            bodyJson: "{\"method\":\"tools/call\",\"params\":{\"name\":\"add\"}}");
+
+        return (ctx, provider);
+    }
+
+    // Error is null when the body omits the member, which is the
+    // no-credentials case: RFC 6750 §3 leaves `error` out of the challenge
+    // there, and the body follows it.
+    private static (string? Error, string Description) ReadErrorBody(HttpContext ctx)
+    {
+        ctx.Response.Body.Seek(0, System.IO.SeekOrigin.Begin);
+        using var reader = new System.IO.StreamReader(ctx.Response.Body);
+        using var doc = JsonDocument.Parse(reader.ReadToEnd());
+        return (
+            doc.RootElement.TryGetProperty("error", out var error) ? error.GetString() : null,
+            doc.RootElement.GetProperty("error_description").GetString()!);
     }
 
     private async Task<HttpContext> InvokeRawAsync(

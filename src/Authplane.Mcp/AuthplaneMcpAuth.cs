@@ -35,13 +35,30 @@ public static class AuthplaneMcpAuth
         /// </summary>
         public InboundDPoPOptions? InboundDPoP { get; }
 
+        /// <summary>
+        /// Optional absolute URL advertised as the <c>resource_metadata</c>
+        /// parameter of every WWW-Authenticate challenge (RFC 9728 §5.1) in
+        /// place of the URL derived from <see cref="Resource"/>. Use it when the
+        /// Protected Resource Metadata document is hosted by the authorization
+        /// server rather than by this resource — authserver serves one per
+        /// registered Resource at
+        /// <c>{issuer}/.well-known/oauth-protected-resource/{ref}</c>. Null
+        /// (the default) keeps the derived resource-hosted URL, and the
+        /// middleware keeps serving that document regardless of this value.
+        /// The <c>resource</c> field of the document at this URL must equal
+        /// <see cref="Resource"/> byte for byte (RFC 9728 §3.3), or clients
+        /// discard it.
+        /// </summary>
+        public string? ResourceMetadataUrl { get; }
+
         public Options(
             string issuer,
             string resource,
             IReadOnlyList<string> scopes,
             bool devMode = false,
             string? realm = null,
-            InboundDPoPOptions? inboundDpop = null)
+            InboundDPoPOptions? inboundDpop = null,
+            string? resourceMetadataUrl = null)
         {
             Issuer = issuer ?? throw new ArgumentNullException(nameof(issuer));
             Resource = resource ?? throw new ArgumentNullException(nameof(resource));
@@ -58,13 +75,70 @@ public static class AuthplaneMcpAuth
             ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
             ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
             ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfInvalidHost(resource, nameof(resource));
             ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resource, nameof(resource));
             ResourceIdentifiers.ThrowIfUserInfo(resource, nameof(resource));
+            ResourceIdentifiers.ThrowIfInvalidPath(resource, nameof(resource));
             ResourceIdentifiers.ThrowIfInvalidQuery(resource, nameof(resource));
             Scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
             DevMode = devMode;
             Realm = realm;
             InboundDPoP = inboundDpop;
+            if (resourceMetadataUrl is not null)
+            {
+                ThrowIfInvalidResourceMetadataUrl(resourceMetadataUrl);
+            }
+
+            ResourceMetadataUrl = resourceMetadataUrl;
+        }
+
+        /// <summary>
+        /// The override reaches the same <c>resource_metadata</c> quoted-string
+        /// the resource identifier does, so it gets the identifier's whole gate
+        /// set rather than a subset: an IDN host, a raw non-ASCII path segment,
+        /// a malformed percent-escape or a bad port all parse into a
+        /// <see cref="Uri"/> with a scheme and a host, ride into the challenge
+        /// and out to unauthenticated clients, and fail discovery with nothing
+        /// on the server side to say why. Same order as the identifier above,
+        /// and the same <see cref="ArgumentException"/> at construction.
+        ///
+        /// Shape only: no scheme narrowing beyond http(s) and no host policy.
+        /// The value is advertised, never fetched, so it carries no SSRF
+        /// surface of its own, and <c>http</c> is accepted on any host because
+        /// a loopback-only carve-out would refuse the in-cluster and
+        /// docker-compose topologies dev mode exists to serve, so a single
+        /// deployment configuration is accepted wherever this option is set.
+        /// </summary>
+        private static void ThrowIfInvalidResourceMetadataUrl(string resourceMetadataUrl)
+        {
+            const string subject = "resourceMetadataUrl";
+
+            // Raw-string scans first, exactly as the resource gate orders them:
+            // Uri.TryCreate trims surrounding whitespace before parsing, so a
+            // trailing space or a backslash clears every check below and is
+            // then stored and advertised verbatim. The challenge escaper
+            // strips control characters but not U+0020, so the client fetches
+            // a percent-encoded space and gets a 404 — a silent discovery
+            // failure, which is the thing this gate exists to prevent.
+            ResourceIdentifiers.ThrowIfFragment(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfMalformedPort(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfInvalidHost(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfUserInfo(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfInvalidPath(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+            ResourceIdentifiers.ThrowIfInvalidQuery(resourceMetadataUrl, nameof(resourceMetadataUrl), subject);
+
+            // http(s) only: those are the schemes an OAuth client will
+            // dereference, so anything else names a document nobody retrieves.
+            if (!Uri.TryCreate(resourceMetadataUrl, UriKind.Absolute, out var uri) ||
+                (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+                 !uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ArgumentException(
+                    "resourceMetadataUrl scheme must be https or http (RFC 9728 §3).",
+                    nameof(resourceMetadataUrl));
+            }
         }
     }
 

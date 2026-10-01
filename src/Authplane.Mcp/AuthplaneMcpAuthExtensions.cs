@@ -3,15 +3,28 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
 
 namespace Authplane.Mcp;
 
 public static class AuthplaneMcpAuthExtensions
 {
-    private static string ProtectedResourceMetadataUrl(AuthplaneResource resource) =>
-        resource.GetProtectedResourceMetadataDocumentUrl();
+    private const string WellKnownPrmPath = "/.well-known/oauth-protected-resource";
+
+    /// <summary>
+    /// The URL a challenge advertises as <c>resource_metadata</c>: the
+    /// configured <see cref="AuthplaneMcpAuth.Options.ResourceMetadataUrl"/>
+    /// when set, otherwise the URL derived from the resource identifier.
+    /// Challenges only — the PRM GET route below keys off the derived URL,
+    /// which is the one document this middleware serves.
+    /// </summary>
+    private static string ProtectedResourceMetadataUrl(
+        AuthplaneMcpAuth.Options options,
+        AuthplaneResource resource) =>
+        options.ResourceMetadataUrl ?? resource.GetProtectedResourceMetadataDocumentUrl();
 
     /// <summary>
     /// Extracts token + optional DPoP proof from the request and enforces the required scope
@@ -60,17 +73,71 @@ public static class AuthplaneMcpAuthExtensions
             if (HttpMethods.IsGet(context.Request.Method))
             {
                 var authplaneResource = context.RequestServices.GetRequiredService<AuthplaneResource>();
-                var documentUrl = ProtectedResourceMetadataUrl(authplaneResource);
-                // Routing is path-keyed: `AbsolutePath` excludes any query the
-                // advertised document URL carries (a resource identifier with a
-                // query keeps it in the derived URL per RFC 9728 §3), so the
-                // one configured document is served regardless of the request's
-                // query string. Serving distinct documents per query value is
-                // not supported.
-                var expectedPath = new Uri(documentUrl, UriKind.Absolute).AbsolutePath;
+                // Always the derived URL, never Options.ResourceMetadataUrl:
+                // that override points challenges at a document hosted
+                // elsewhere (the authorization server), whose path says
+                // nothing about where this middleware answers. The
+                // resource-hosted document stays served either way.
+                var documentUrl = authplaneResource.GetProtectedResourceMetadataDocumentUrl();
+                // Routing is path-keyed, and compares like against like. The
+                // derived document URL is byte-exact with respect to the
+                // configured identifier, so the expected path is sliced off it
+                // rather than re-parsed: `Uri.AbsolutePath` re-renders what it
+                // returns (`%7E` becomes `~`) — the canonicalization the
+                // derivation itself stopped applying — and comparing its
+                // output against the *decoded* `Request.Path` left an
+                // advertised `…/m%7Ecp` answered 401 at its own URL. The
+                // slice boundaries are the derivation's own: the authority
+                // cannot contain '/', so the first occurrence of the
+                // well-known string is the inserted one, and the path cannot
+                // contain a raw '?', so the first '?' after it starts the
+                // query. The query is excluded on both sides (a resource
+                // identifier with a query keeps it in the derived URL per
+                // RFC 9728 §3), so the one configured document is served
+                // regardless of the request's query string. Serving distinct
+                // documents per query value is not supported.
+                // The derivation unconditionally inserts the well-known
+                // string (OAuthProtectedResourceMetadata.GetDocumentUrl), so
+                // this IndexOf cannot miss. That invariant lives in another
+                // class, and this is the only site that depends on it — the
+                // guard pins it here, where without it a regression would
+                // surface as an ArgumentOutOfRangeException from the '?'
+                // IndexOf on every unauthenticated GET.
+                var wellKnownStart = documentUrl.IndexOf(WellKnownPrmPath, StringComparison.Ordinal);
+                string? expectedPath = null;
+                if (wellKnownStart >= 0)
+                {
+                    var expectedQueryStart = documentUrl.IndexOf('?', wellKnownStart);
+                    expectedPath = expectedQueryStart >= 0
+                        ? documentUrl[wellKnownStart..expectedQueryStart]
+                        : documentUrl[wellKnownStart..];
+                }
+
+                // The primary comparison is over the encoded request target —
+                // `IHttpRequestFeature.RawTarget`, the bytes of the request
+                // line — because that is the representation the advertised URL
+                // is expressed in: a client that reads `resource_metadata` and
+                // fetches it sends those bytes. The decoded comparison stays
+                // as a fallback for hosts that do not populate `RawTarget` and
+                // for a client requesting an RFC 3986 §6.2.2.2-equivalent form
+                // of the advertised path. Its expected side is decoded the way
+                // Kestrel decodes into `Request.Path` — everything except
+                // `%2F` — so the two sides stay like for like on the server
+                // that decoding was measured against; see DecodePathLikeKestrel
+                // for why `Uri.UnescapeDataString` is the wrong decoder here.
                 var requestPath = context.Request.Path.Value ?? string.Empty;
-                if (PathsMatch(requestPath, expectedPath) ||
-                    PathsMatch(requestPath, "/.well-known/oauth-protected-resource"))
+                var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
+                string? rawRequestPath = null;
+                if (!string.IsNullOrEmpty(rawTarget))
+                {
+                    var rawQueryStart = rawTarget.IndexOf('?', StringComparison.Ordinal);
+                    rawRequestPath = rawQueryStart >= 0 ? rawTarget[..rawQueryStart] : rawTarget;
+                }
+
+                if ((expectedPath is not null &&
+                        ((rawRequestPath is not null && PathsMatch(rawRequestPath, expectedPath)) ||
+                         PathsMatch(requestPath, DecodePathLikeKestrel(expectedPath)))) ||
+                    PathsMatch(requestPath, WellKnownPrmPath))
                 {
                     context.Response.ContentType = "application/json; charset=utf-8";
                     context.Response.Headers[HeaderNames.CacheControl] = "public, max-age=3600";
@@ -82,7 +149,7 @@ public static class AuthplaneMcpAuthExtensions
             }
 
             var verifier = context.RequestServices.GetRequiredService<AuthplaneResource>();
-            var resourceMetadataUrl = ProtectedResourceMetadataUrl(verifier);
+            var resourceMetadataUrl = ProtectedResourceMetadataUrl(options, verifier);
             // RFC 9449 §7.1: the DPoP challenge `algs` parameter SHOULD reflect
             // what the resource actually accepts. When InboundDPoPOptions narrows
             // the set (e.g. ES256-only) we must mirror that — otherwise the
@@ -117,7 +184,7 @@ public static class AuthplaneMcpAuthExtensions
                     description: null,
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("Missing Authorization header.").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context, AuthplaneErrors.ErrorResponseBody()).ConfigureAwait(false);
                 return;
             }
 
@@ -143,7 +210,7 @@ public static class AuthplaneMcpAuthExtensions
                     description: null,
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("Invalid Authorization header format.").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context, AuthplaneErrors.ErrorResponseBody()).ConfigureAwait(false);
                 return;
             }
 
@@ -157,7 +224,7 @@ public static class AuthplaneMcpAuthExtensions
                     description: null,
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("Missing access token.").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context, AuthplaneErrors.ErrorResponseBody()).ConfigureAwait(false);
                 return;
             }
 
@@ -192,8 +259,9 @@ public static class AuthplaneMcpAuthExtensions
                         proofs: dpopHeaderValues,
                         replayStore: replayStore);
                 }
-                catch (DPoPMultipleProofsException)
+                catch (DPoPMultipleProofsException ex)
                 {
+                    LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                     // RFC 9449 §4.3 #1 → §7.1: the one DPoP failure that
                     // carries error="invalid_dpop_proof"; every other DPoP
                     // rejection stays on invalid_token. The challenge is
@@ -208,10 +276,12 @@ public static class AuthplaneMcpAuthExtensions
                         ChallengeScheme.DPoPOnly,
                         resourceMetadataUrl,
                         error: OAuthConstants.ErrorCodes.InvalidDPoPProof,
-                        description: "multiple_dpop_proofs",
+                        description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InvalidDPoPProof),
                         realm: options.Realm,
                         dpopAlgs: dpopAlgs);
-                    await context.Response.WriteAsync("invalid_dpop_proof: multiple_dpop_proofs").ConfigureAwait(false);
+                    await WriteErrorBodyAsync(context,
+                        AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InvalidDPoPProof))
+                        .ConfigureAwait(false);
                     return;
                 }
             }
@@ -247,8 +317,9 @@ public static class AuthplaneMcpAuthExtensions
                     }
                 }
             }
-            catch (InsufficientScopeException)
+            catch (InsufficientScopeException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status403Forbidden);
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 // RFC 9449 §8.2 lets the server supply a nonce on any
                 // response: the proof was accepted before the scope check
@@ -264,68 +335,83 @@ public static class AuthplaneMcpAuthExtensions
                     usedDpopScheme ? ChallengeScheme.DPoPOnly : ChallengeScheme.BearerOnly,
                     resourceMetadataUrl,
                     error: "insufficient_scope",
-                    description: "Insufficient scope",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InsufficientScope),
                     realm: options.Realm,
                     scope: requiredScopes is { Length: > 0 } ? string.Join(' ', requiredScopes) : null,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("insufficient_scope").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InsufficientScope))
+                    .ConfigureAwait(false);
                 return;
             }
-            catch (DPoPProofMissingException)
+            catch (DPoPProofMissingException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                 // RFC 9449 §7.1 — DPoP errors use the DPoP challenge scheme.
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = BuildChallenge(
                     ChallengeScheme.DPoPOnly,
                     resourceMetadataUrl,
                     error: "invalid_token",
-                    description: "dpop_proof_missing",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InvalidToken),
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("invalid_token: dpop_proof_missing").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InvalidToken))
+                    .ConfigureAwait(false);
                 return;
             }
-            catch (InvalidDPoPProofException)
+            catch (InvalidDPoPProofException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = BuildChallenge(
                     ChallengeScheme.DPoPOnly,
                     resourceMetadataUrl,
                     error: "invalid_token",
-                    description: "invalid_dpop_proof",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InvalidToken),
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("invalid_token: invalid_dpop_proof").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InvalidToken))
+                    .ConfigureAwait(false);
                 return;
             }
-            catch (DPoPBindingMismatchException)
+            catch (DPoPBindingMismatchException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = BuildChallenge(
                     ChallengeScheme.DPoPOnly,
                     resourceMetadataUrl,
                     error: "invalid_token",
-                    description: "dpop_binding_mismatch",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InvalidToken),
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("invalid_token: dpop_binding_mismatch").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InvalidToken))
+                    .ConfigureAwait(false);
                 return;
             }
-            catch (DPoPReplayDetectedException)
+            catch (DPoPReplayDetectedException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = BuildChallenge(
                     ChallengeScheme.DPoPOnly,
                     resourceMetadataUrl,
                     error: "invalid_token",
-                    description: "dpop_replay_detected",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.InvalidToken),
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("invalid_token: dpop_replay_detected").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.InvalidToken))
+                    .ConfigureAwait(false);
                 return;
             }
             catch (DPoPNonceRequiredException ex)
             {
+                LogFailure(context, ex, StatusCodes.Status401Unauthorized);
                 // RFC 9449 §9 choreography: 401 with a DPoP-scheme challenge
                 // carrying error="use_dpop_nonce" AND the fresh nonce in the
                 // DPoP-Nonce response header. The client re-signs its proof
@@ -344,10 +430,12 @@ public static class AuthplaneMcpAuthExtensions
                     ChallengeScheme.DPoPOnly,
                     resourceMetadataUrl,
                     error: OAuthConstants.ErrorCodes.UseDpopNonce,
-                    description: "dpop_nonce_required",
+                    description: AuthplaneErrors.ErrorDescriptionFor(OAuthConstants.ErrorCodes.UseDpopNonce),
                     realm: options.Realm,
                     dpopAlgs: dpopAlgs);
-                await context.Response.WriteAsync("use_dpop_nonce: dpop_nonce_required").ConfigureAwait(false);
+                await WriteErrorBodyAsync(context,
+                    AuthplaneErrors.ErrorResponseBody(OAuthConstants.ErrorCodes.UseDpopNonce))
+                    .ConfigureAwait(false);
                 return;
             }
             catch (AuthplaneException ex)
@@ -361,17 +449,20 @@ public static class AuthplaneMcpAuthExtensions
                 // into this branch — advertising Bearer alone is what stops
                 // the negotiate-DPoP-then-reject loop.
                 var status = AuthplaneErrors.HttpStatus(ex);
+                LogFailure(context, ex, status);
                 context.Response.StatusCode = status;
                 if (status == StatusCodes.Status401Unauthorized)
                 {
                     context.Response.Headers.WWWAuthenticate = BuildChallenge(
                         defaultScheme,
                         resourceMetadataUrl,
-                        error: "invalid_token",
-                        description: ex.Message,
+                        error: AuthplaneErrors.ErrorCodeFor(ex),
+                        description: AuthplaneErrors.ErrorDescriptionFor(AuthplaneErrors.ErrorCodeFor(ex)),
                         realm: options.Realm,
                         dpopAlgs: dpopAlgs);
-                    await context.Response.WriteAsync($"invalid_token: {ex.Message}").ConfigureAwait(false);
+                    await WriteErrorBodyAsync(context,
+                        AuthplaneErrors.ErrorResponseBody(AuthplaneErrors.ErrorCodeFor(ex)))
+                        .ConfigureAwait(false);
                 }
                 else
                 {
@@ -379,7 +470,9 @@ public static class AuthplaneMcpAuthExtensions
                     // outage, misconfigured verifier extension). No
                     // WWW-Authenticate: a challenge would direct the client to
                     // fix credentials that are not the problem.
-                    await context.Response.WriteAsync(ex.Message).ConfigureAwait(false);
+                    await WriteErrorBodyAsync(context,
+                        AuthplaneErrors.ErrorResponseBody(AuthplaneErrors.ServerErrorCodeFor(status)))
+                        .ConfigureAwait(false);
                 }
                 return;
             }
@@ -448,6 +541,82 @@ public static class AuthplaneMcpAuthExtensions
             }),
             _ => BuildSingleChallenge("Bearer", resourceMetadataUrl, error, description, realm, scope, dpopAlgs: null),
         };
+    }
+
+    /// <summary>
+    /// Write the RFC 6750 §3 JSON error body, with the media type that says so.
+    ///
+    /// The bodies used to be prose ("Missing Authorization header.") or a
+    /// colon-joined pair ("invalid_token: dpop_proof_missing"), neither of
+    /// which a client can parse; every sibling SDK in this family answers with
+    /// the RFC's <c>{"error": ..., "error_description": ...}</c> object, so
+    /// this one does too.
+    /// </summary>
+    private static Task WriteErrorBodyAsync(HttpContext context, string json)
+    {
+        context.Response.ContentType = "application/json; charset=utf-8";
+        return context.Response.WriteAsync(json);
+    }
+
+    /// <summary>
+    /// The category the middleware logs under. Named for the assembly so an
+    /// operator can raise this one path to Debug without raising the host's.
+    /// </summary>
+    private const string LogCategory = "Authplane.Mcp";
+
+    /// <summary>
+    /// Pre-compiled by <see cref="LoggerMessage"/> rather than called through
+    /// the <c>ILogger.Log*</c> extensions: CA1848 is an error in this
+    /// repository, and this sits on the request path.
+    /// </summary>
+    private static readonly Action<ILogger, string, string, int, Exception?> LogServerFailure =
+        LoggerMessage.Define<string, string, int>(
+            LogLevel.Error,
+            new EventId(1, "AuthplaneVerificationFailed"),
+            "Authplane could not verify {Method} {Path} and answered {Status}.");
+
+    private static readonly Action<ILogger, string, string, int, Exception?> LogRejection =
+        LoggerMessage.Define<string, string, int>(
+            LogLevel.Debug,
+            new EventId(2, "AuthplaneRequestRejected"),
+            "Authplane rejected {Method} {Path} with {Status}.");
+
+    /// <summary>
+    /// Record why the request failed before the response discards it. The body
+    /// and challenge carry a fixed description chosen by the error code, never
+    /// the exception's own message — the caller has by definition not
+    /// authenticated, and the SDK's messages name the unknown <c>kid</c>, the
+    /// claim that did not validate, or the <c>aud</c> the resource expects. The
+    /// operator still needs that detail, and this middleware is the last place
+    /// that holds it: every arm below catches, answers, and returns.
+    ///
+    /// Logging is optional, not required. A host with no logging registered
+    /// gets <c>null</c> from <see cref="ILoggerFactory"/> and this is a no-op,
+    /// so adding the call cannot turn a working host into a failing one.
+    ///
+    /// A rejection is logged at Debug, not Warning: reaching it takes no
+    /// credentials, so an unauthenticated caller would otherwise choose this
+    /// server's log volume. An operator diagnosing a rejection turns the
+    /// category up for as long as it takes. A 5xx is the server's own fault,
+    /// cannot be provoked by a caller, and is what an operator needs to see
+    /// without having been told to look, so it goes to Error.
+    /// </summary>
+    private static void LogFailure(HttpContext context, Exception ex, int status)
+    {
+        var logger = context.RequestServices.GetService<ILoggerFactory>()?.CreateLogger(LogCategory);
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (status >= StatusCodes.Status500InternalServerError)
+        {
+            LogServerFailure(logger, context.Request.Method, context.Request.Path.Value ?? string.Empty, status, ex);
+        }
+        else if (logger.IsEnabled(LogLevel.Debug))
+        {
+            LogRejection(logger, context.Request.Method, context.Request.Path.Value ?? string.Empty, status, ex);
+        }
     }
 
     private static string BuildSingleChallenge(
@@ -522,6 +691,65 @@ public static class AuthplaneMcpAuthExtensions
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Decodes a percent-encoded path the way Kestrel decodes the request
+    /// target into <c>Request.Path</c> (measured; the other ASP.NET Core
+    /// servers are unmeasured): every escape except <c>%2F</c>, which stays
+    /// encoded because decoding it would add a segment boundary the client
+    /// never sent. It is not <see cref="Uri.UnescapeDataString(string)"/>
+    /// (nor <c>PathString.FromUriComponent</c>) — those decode every escape,
+    /// and the difference bites on exactly <c>%2F</c>: unescaping the
+    /// expected path turned an identifier's <c>mcp%2F</c> into <c>mcp/</c>,
+    /// which after the trailing-slash trim both failed to match the
+    /// identifier's own advertised document URL and falsely matched the URL
+    /// a different, <c>%2F</c>-less identifier advertises.
+    /// </summary>
+    /// <remarks>
+    /// <c>%2F</c> is the only exception. This decoder used to hold back
+    /// <c>%5C</c> as well, on the reasoning that a backslash is a segment
+    /// separator too — it is not, to Kestrel, which decodes <c>%5C</c> like
+    /// any other escape. A <c>%5C</c>-bearing resource identifier therefore
+    /// answered 401 at its own advertised metadata URL wherever the raw
+    /// request target is unavailable and this fallback decides. The claim is
+    /// now measured against a live Kestrel rather than asserted; the test
+    /// project's <c>Kestrel_DecodesEveryEscapeExceptPercent2F_Measured</c>
+    /// is the measurement.
+    /// </remarks>
+    private static string DecodePathLikeKestrel(string encodedPath)
+    {
+        StringBuilder? sb = null;
+        var start = 0;
+        for (var i = 0; i + 2 < encodedPath.Length; i++)
+        {
+            if (encodedPath[i] != '%' ||
+                !Uri.IsHexDigit(encodedPath[i + 1]) ||
+                !Uri.IsHexDigit(encodedPath[i + 2]))
+            {
+                continue;
+            }
+
+            var octet = (Uri.FromHex(encodedPath[i + 1]) << 4) | Uri.FromHex(encodedPath[i + 2]);
+            if (octet != '/')
+            {
+                continue;
+            }
+
+            sb ??= new StringBuilder(encodedPath.Length);
+            sb.Append(Uri.UnescapeDataString(encodedPath[start..i]));
+            sb.Append(encodedPath, i, 3);
+            i += 2;
+            start = i + 1;
+        }
+
+        if (sb is null)
+        {
+            return Uri.UnescapeDataString(encodedPath);
+        }
+
+        sb.Append(Uri.UnescapeDataString(encodedPath[start..]));
+        return sb.ToString();
+    }
+
     private static bool PathsMatch(string requestPath, string expectedPath)
     {
         var a = requestPath.TrimEnd('/');
@@ -536,6 +764,17 @@ public static class AuthplaneMcpAuthExtensions
             b = "/";
         }
 
+        // OrdinalIgnoreCase stays deliberately now that the expected side is
+        // the operator's exact bytes. The compared strings are paths only —
+        // the scheme and host, the components RFC 3986 §6.2.2.1 makes
+        // case-insensitive, never reach them — but the one case-insensitive
+        // part of an encoded path is the hex digits of a percent-escape
+        // (§6.2.2.1 again: `%2f` and `%2F` name the same octet), and the raw
+        // request target carries the client's casing of them. The folding is
+        // broader than that (it also matches a case-variant of the path
+        // letters themselves), which is pre-existing laxity, not a routing
+        // hazard: there is one document, so a lax match can only serve it,
+        // never a different identifier's.
         return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 

@@ -9,6 +9,15 @@ namespace Authplane;
 /// Reports a token as revoked when the AS responds with <c>active=false</c>.
 /// Caches "active" results for a configurable TTL to avoid per-request AS round-trips.
 /// </summary>
+/// <remarks>
+/// The <see cref="AuthplaneAuthClient"/> must authenticate as a confidential
+/// client that is either the token's issuing client or a runtime-client of the
+/// Resource named in <c>aud</c>. authserver ≥ 0.1.2 answers
+/// <c>active=false</c> to anyone else — including every public client — so a
+/// resource server introspecting with the wrong credentials rejects every
+/// token as revoked. Register the resource server with
+/// <c>authserver admin resource runtime-client add --client-id &lt;rs-client-id&gt; --slug &lt;resource-slug&gt;</c>.
+/// </remarks>
 public sealed class IntrospectionRevocation : IRevocationChecker
 {
     private readonly AuthplaneAuthClient _client;

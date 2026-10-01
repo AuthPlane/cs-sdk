@@ -5,6 +5,7 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
 
@@ -213,6 +214,33 @@ public sealed class AuthplaneMcpAuthNonceTests : IDisposable
         Assert.False(ctx.Response.Headers.ContainsKey("DPoP-Nonce"));
     }
 
+    [Fact]
+    public async Task NoncePolicyOn_MisbehavingIssuer_LogsTheCauseAtError()
+    {
+        // The 500 body says "Internal Server Error" and nothing else, by
+        // design. An operator cannot act on that, and a 5xx is this server's
+        // own fault rather than something a caller provoked, so the cause goes
+        // to the log at Error — visible without anyone having been told to
+        // raise a category first.
+        var loggerFactory = new CapturingLoggerFactory();
+        var (pipeline, provider, accessToken, dpopProvider) =
+            await BuildDpopPipelineAsync(new MisbehavingNonceIssuer(), loggerFactory);
+
+        var proof = await dpopProvider.GenerateProofAsync(
+            "POST", _resource,
+            new DPoPProofOptions(accessToken: accessToken),
+            CancellationToken.None);
+
+        var ctx = await InvokeWithDpopAsync(pipeline, provider, accessToken, proof);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+
+        var record = Assert.Single(loggerFactory.Records);
+        Assert.Equal(LogLevel.Error, record.Level);
+        Assert.NotNull(record.Exception);
+        Assert.Equal("Authplane.Mcp", loggerFactory.Category);
+    }
+
     private sealed class MisbehavingNonceIssuer : IDPoPNonceIssuer
     {
         public string Issue() => "bad nonce";
@@ -294,7 +322,7 @@ public sealed class AuthplaneMcpAuthNonceTests : IDisposable
     }
 
     private async Task<(RequestDelegate Pipeline, ServiceProvider Provider, string AccessToken, DPoPProvider DpopProvider)>
-        BuildDpopPipelineAsync(IDPoPNonceIssuer? nonceIssuer)
+        BuildDpopPipelineAsync(IDPoPNonceIssuer? nonceIssuer, ILoggerFactory? loggerFactory = null)
     {
         var keyMaterial = DPoPKeyMaterial.CreateES256();
         var dpopProvider = new DPoPProvider(keyMaterial);
@@ -312,6 +340,11 @@ public sealed class AuthplaneMcpAuthNonceTests : IDisposable
         var services = new ServiceCollection();
         services.AddSingleton(verifier);
         services.AddSingleton<IDPoPReplayStore, InMemoryDPoPReplayStore>();
+        if (loggerFactory is not null)
+        {
+            services.AddSingleton(loggerFactory);
+        }
+
         var provider = services.BuildServiceProvider();
 
         var options = new AuthplaneMcpAuth.Options(

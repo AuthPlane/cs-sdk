@@ -72,16 +72,18 @@ public sealed class AuthplaneResource : IAsyncDisposable
         // Authoritative identifier gates: every construction path — CreateAsync,
         // AuthplaneClient.CreateResourceAsync, and the MCP adapter's factory —
         // funnels through this constructor, so no configured resource can carry
-        // a fragment, whitespace, a backslash, userinfo, or a malformed query
-        // into the PRM document or the derived well-known URL, and no relative,
+        // a fragment, whitespace, a backslash, userinfo, or a malformed path
+        // or query into the PRM document or the derived well-known URL, and no relative,
         // scheme-relative, or host-less identifier can derive a malformed one.
         // The fragment check runs first so an identifier broken both ways
         // reports the fragment.
         ResourceIdentifiers.ThrowIfFragment(Resource, nameof(resource));
         ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(Resource, nameof(resource));
         ResourceIdentifiers.ThrowIfMalformedPort(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidHost(Resource, nameof(resource));
         ResourceIdentifiers.ThrowIfNotAbsoluteUrl(Resource, nameof(resource));
         ResourceIdentifiers.ThrowIfUserInfo(Resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidPath(Resource, nameof(resource));
         ResourceIdentifiers.ThrowIfInvalidQuery(Resource, nameof(resource));
         Scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
         _ownsClient = ownsClient;
@@ -138,9 +140,11 @@ public sealed class AuthplaneResource : IAsyncDisposable
     /// the <c>iss</c> in tokens this resource will verify.</param>
     /// <param name="resource">Resource identifier this RS publishes (RFC 9728).
     /// Must be an absolute URL with a scheme and a host (RFC 8707 §2,
-    /// RFC 9728 §3) and must not contain a fragment component (RFC 8707 §2,
-    /// RFC 9728 §1.2); violations are rejected here rather than silently
-    /// producing a malformed metadata URL.</param>
+    /// RFC 9728 §3) whose host is within the RFC 3986 §3.2.2 production — an
+    /// internationalized host belongs in a URI as its A-label — and must not
+    /// contain a fragment component (RFC 8707 §2, RFC 9728 §1.2); violations are
+    /// rejected here rather than silently producing a malformed metadata
+    /// URL.</param>
     /// <param name="scopes">Scopes this RS requires; surfaced in PRM and in
     /// <c>WWW-Authenticate</c> on 401 challenges.</param>
     /// <param name="fetchSettings">HTTP/timeout/dev-mode policy; defaults to
@@ -172,17 +176,16 @@ public sealed class AuthplaneResource : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(resource);
         // Repeated ahead of the constructor so a bad identifier fails before
         // the issuer metadata fetch below rather than after a network round
-        // trip. It also keeps these two cases clear of a known leak: the
-        // constructor runs after AuthplaneClient.CreateAsync, and a throw from
-        // it leaks that client (its HttpClient and the JwksCache refresh task
-        // are released only by DisposeAsync). Do not read this guard as a fix
-        // for that — the other throw paths in the constructor still leak, and
-        // the constructor's copies are what actually guarantee the invariant.
+        // trip. It is not what keeps the client from leaking on a rejected
+        // identifier — the try/catch around the constructor below is; these
+        // copies only save the round trip.
         ResourceIdentifiers.ThrowIfFragment(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfWhitespaceOrBackslash(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfMalformedPort(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidHost(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfNotAbsoluteUrl(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfUserInfo(resource, nameof(resource));
+        ResourceIdentifiers.ThrowIfInvalidPath(resource, nameof(resource));
         ResourceIdentifiers.ThrowIfInvalidQuery(resource, nameof(resource));
 
         ArgumentNullException.ThrowIfNull(scopes);
@@ -193,11 +196,27 @@ public sealed class AuthplaneResource : IAsyncDisposable
 
         var settings = fetchSettings ?? FetchSettings.FromDevMode(devMode: false);
         var client = await AuthplaneClient.CreateAsync(issuer, settings, cancellationToken).ConfigureAwait(false);
-        return new AuthplaneResource(client, resource, scopeList, ownsClient: true,
-            revocationChecker: revocationChecker, failClosed: failClosed,
-            clockSkewSeconds: clockSkewSeconds,
-            inboundDpop: inboundDpop,
-            allowedAlgorithms: allowedAlgorithms);
+
+        // This overload owns the client it just built, and ownership only transfers
+        // once the constructor returns. Every validating throw in the constructor —
+        // the identifier gates, a negative clockSkewSeconds, an empty or unsupported
+        // allowedAlgorithms — would otherwise abandon a client nothing can reach,
+        // stranding its HttpClient and the JwksCache background refresh, which are
+        // released only by DisposeAsync. Dispose it here and let the original
+        // failure propagate.
+        try
+        {
+            return new AuthplaneResource(client, resource, scopeList, ownsClient: true,
+                revocationChecker: revocationChecker, failClosed: failClosed,
+                clockSkewSeconds: clockSkewSeconds,
+                inboundDpop: inboundDpop,
+                allowedAlgorithms: allowedAlgorithms);
+        }
+        catch
+        {
+            await client.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public Task<VerifiedClaims> VerifyAsync(
@@ -431,7 +450,22 @@ public sealed class AuthplaneResource : IAsyncDisposable
                         .ConfigureAwait(false);
                     if (isRevoked)
                     {
-                        throw new TokenRevokedException($"Token '{jti}' has been revoked.");
+                        // The JWT already passed local verification, so an active=false from
+                        // introspection is either a real revocation or the AS refusing to answer a
+                        // client it does not consider the token's owner (authserver >= 0.1.2
+                        // runtime-client rule). That distinction is operator-only: the middleware
+                        // copies Message into the WWW-Authenticate error_description and the
+                        // response body, so it goes on the inner exception, which no caller sees.
+                        // Only the built-in checker can produce the introspection cause; a custom
+                        // IRevocationChecker must not be blamed for a call it never made.
+                        throw _revocationChecker is IntrospectionRevocation
+                            ? new TokenRevokedException(
+                                $"Token '{jti}' has been revoked.",
+                                new VerifierRuntimeException(
+                                    "introspection returned active=false for a token that passed local verification; "
+                                    + "if this is not a revocation, the AS does not recognise this resource server as the "
+                                    + "token's owner (authserver >= 0.1.2: issuing client or runtime-client of the Resource in aud)."))
+                            : new TokenRevokedException($"Token '{jti}' has been revoked.");
                     }
                 }
                 catch (TokenRevokedException)
@@ -747,8 +781,8 @@ public sealed class AuthplaneResource : IAsyncDisposable
         string? nextNonce = null;
         if (!string.IsNullOrWhiteSpace(dpopRequest.RequiredNonce))
         {
-            // Legacy exact-echo check (sibling-SDK `expected_nonce` parity):
-            // failures keep InvalidDPoPProofException, as released.
+            // Legacy exact-echo check, kept for the released behaviour:
+            // failures stay InvalidDPoPProofException.
             var proofNonce = GetClaim("nonce");
             if (string.IsNullOrWhiteSpace(proofNonce))
             {

@@ -47,6 +47,22 @@ public class CircuitPolicyTests
     }
 
     [Fact]
+    public void TokenRequest_AccessDenied403_DoesNotRecord()
+    {
+        // Cross-client exchange refused by the Resource's allow-list. The 403
+        // would otherwise fall into the "401/403 means client auth" branch.
+        var ex = new AccessDeniedException("HTTP 403", httpStatus: 403);
+        Assert.False(CircuitPolicy.ShouldRecordFailure(ex));
+    }
+
+    [Fact]
+    public void TokenRequest_InvalidTarget_DoesNotRecord()
+    {
+        var ex = new InvalidTargetException("HTTP 400", httpStatus: 400);
+        Assert.False(CircuitPolicy.ShouldRecordFailure(ex));
+    }
+
+    [Fact]
     public void TokenRequest_InvalidClient_Records()
     {
         var ex = new AuthplaneTokenRequestException(

@@ -4,16 +4,31 @@ name: Conformance catalog drift
 #
 # PR and release CI pin the catalog to the SHA in `.conformance-catalog-ref`, so
 # a new catalog case can never break CI on its own. The trade-off is that new
-# cases go unnoticed until someone bumps the ref. This job closes that gap: on a
-# weekly schedule it checks out the catalog's *default* branch (latest,
-# unpinned), points the harness at it, and runs the same alignment assertion
-# (Authplane.Tests.ConformanceCatalogAlignmentTests) that PR CI runs against the
-# pinned catalog. The only difference is which catalog it reads.
+# cases go unnoticed until someone bumps the ref. This job closes that gap on a
+# weekly schedule.
 #
 # This workflow has no `pull_request` trigger, so a failing scheduled run cannot
 # block a PR. It deliberately FAILS on drift, so the run turns red and the
 # `::warning::` plus job-summary note are not buried in an otherwise-green run —
 # prompting a coordinated ref bump alongside the SDK-side coverage.
+#
+# The job runs TWO checks, because they see different things:
+#
+#   1. Case-ID alignment against the tip. It checks out the catalog's *default*
+#      branch (latest, unpinned), points the harness at it, and runs the same
+#      alignment assertion (ConformanceCatalogAlignmentTests) that PR CI runs
+#      against the pinned catalog. It reports cases ADDED to the catalog that
+#      this SDK does not yet cover, and markers naming a case the catalog no
+#      longer has. This is a set comparison over ids.
+#
+#   2. Case-BODY drift for the cases this SDK registers. It reports a case that
+#      was re-tightened IN PLACE — same id, changed requirement. Check 1 is
+#      blind to this by construction: the id set is unchanged, so the case still
+#      looks adopted while the requirement underneath it has moved, and the SDK
+#      keeps declaring conformance to wording nothing verified it against. That
+#      has already happened once, to the metadata jwks_uri rotation case.
+#      Check 2 needs the catalog at BOTH refs in the same job, which is why the
+#      pinned catalog is fetched here alongside the tip.
 
 on:
   schedule:
@@ -110,11 +125,97 @@ jobs:
           cat "$log"
           exit "$status"
 
-      # Runs even when the alignment step fails the job, so the `::warning::` and
+      # The catalog at the ref this repo PINS, alongside the tip cloned above.
+      # The body check needs both to compare anything; with only the tip it
+      # would have nothing to compare against and could report nothing but
+      # green. Reuses the same fetch ci.yml and release.yml use — including its
+      # 40-hex-SHA guard and its unreachable-ref failure — rather than a third
+      # copy of that logic that could be tightened in one place and not the
+      # others. CONFORMANCE_CATALOG_DEST keeps it off the default path, which
+      # the tip clone above already occupies.
+      #
+      # Placed AFTER the alignment check, with if: always(), so the two checks
+      # fail independently. Only check 2 reads the pinned catalog. Run before
+      # `align`, a failed fetch — a transient error on this second clone, or a
+      # pinned SHA that has become unreachable — would skip `Setup .NET` and
+      # `align` (neither carries an `if:`, so both default to `success()`) and
+      # silently drop the id-level check that ran on its own before check 2
+      # existed. `Report drift` would then find no alignment.log and report the
+      # skip as a build or harness problem, which is the wrong diagnosis for a
+      # check that never started.
+      - name: Fetch pinned conformance catalog (out of tree)
+        if: always()
+        env:
+          CONFORMANCE_CATALOG_DEST: ${{ runner.temp }}/conformance-pinned
+        run: .github/scripts/fetch-conformance-catalog.sh
+
+      # The ids for check 2. Registration in this repo is a [Conformance]
+      # attribute, and the ids come from reflection over the compiled
+      # attributes — the same scan the alignment assertion above is written
+      # against — rather than from a match over the test sources, so the two
+      # cannot disagree about what registered.
+      #
+      # Run against the PINNED catalog, not the tip. The scan itself does not
+      # read the catalog, but the alignment assertion in the same test class
+      # does, and pointing it at the pin keeps this step independent of the step
+      # above, which is EXPECTED to go red whenever the tip has drifted.
+      #
+      # if: always() because of that: the id-level check failing is the normal
+      # way this job reports, and the body check must still run after it.
+      - name: Collect the case ids this SDK registers
+        if: always()
+        shell: bash
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance-pinned/oauth-sdk-conformance-catalog.yaml
+          CONFORMANCE_MARKER_SCAN_DIR: ${{ runner.temp }}/conformance-marker-scan
+        run: |
+          # Discard anything an earlier step left behind. If the run below fails
+          # to produce a new scan, the id script must find nothing rather than
+          # silently read a stale one and describe the wrong commit.
+          rm -rf "$CONFORMANCE_MARKER_SCAN_DIR"
+
+          status=0
+          for proj in tests/Authplane.Tests/Authplane.Tests.csproj \
+                      tests/Authplane.Mcp.Tests/Authplane.Mcp.Tests.csproj; do
+            dotnet test "$proj" \
+              --configuration Release \
+              --filter "FullyQualifiedName~ConformanceCatalogAlignmentTests" \
+              -- RunConfiguration.TreatNoTestsAsError=true \
+              >>"$RUNNER_TEMP/pinned-suite.log" 2>&1 || status=$?
+          done
+          if [ "$status" -ne 0 ]; then
+            # Not this job's signal to raise: a suite that fails against its own
+            # pinned catalog is red on every PR in ci.yml already. Surfaced, and
+            # the id list still comes from THIS run's scan, never an older one.
+            echo "::warning::The alignment tests did not pass against the pinned catalog (exit $status). This job reports catalog drift, not suite health — see ci.yml. Log tail follows."
+            tail -n 40 "$RUNNER_TEMP/pinned-suite.log"
+          fi
+
+          .github/scripts/conformance-registered-case-ids.sh \
+            > "$RUNNER_TEMP/registered-case-ids.txt"
+          echo "This SDK registers $(wc -l < "$RUNNER_TEMP/registered-case-ids.txt") conformance case(s)."
+
+      # Check 2. Fails the job when a case this SDK registers changed body
+      # between the pinned ref and the tip, and fails just as loudly when it
+      # cannot do that comparison at all.
+      - name: Check pinned case bodies against the catalog tip
+        id: bodies
+        if: always()
+        shell: bash
+        env:
+          PINNED_CATALOG: ${{ runner.temp }}/conformance-pinned/oauth-sdk-conformance-catalog.yaml
+          TIP_CATALOG: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+          REGISTERED_IDS: ${{ runner.temp }}/registered-case-ids.txt
+          COVERAGE_DIR: "tests/"
+        run: |
+          DRIFT_SUMMARY="$GITHUB_STEP_SUMMARY" \
+            .github/scripts/conformance-case-body-drift.sh
+
+      # Runs even when an earlier step fails the job, so the `::warning::` and
       # the job summary are always written on drift. A `failure` outcome alone
-      # does not mean drift — the step also fails on a compile error or a NuGet
-      # restore failure. Real drift is identified by the marker the assertion
-      # writes into its message (ConformanceCatalogAlignment.DriftMarker);
+      # does not mean drift — the alignment step also fails on a compile error or
+      # a NuGet restore failure. Real drift is identified by the marker the
+      # assertion writes into its message (ConformanceCatalogAlignment.DriftMarker);
       # anything else is reported as an infrastructure problem, as are
       # skipped/cancelled outcomes, where an earlier step failed and the
       # alignment never ran.
@@ -122,9 +223,23 @@ jobs:
         if: always()
         shell: bash
         run: |
-          pinned="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
-          grep -Eq '^[0-9a-f]{40}$' <<<"$pinned" \
-            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          # Quoted for the reader only. The 40-hex guard on this value lives in
+          # fetch-conformance-catalog.sh, which this workflow now runs, so a
+          # malformed ref turns that step red with its own message instead of
+          # failing the reporting step and taking the drift verdict with it.
+          pinned="$(tr -d '[:space:]' < "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+
+          # The body check writes its own detail into the step summary when it
+          # finds something. Recorded here either way, so a green run states that
+          # both checks ran rather than only the one that prints on success — a
+          # check whose silence is indistinguishable from its absence is how this
+          # class went unnoticed in the first place.
+          if [ "${{ steps.bodies.outcome }}" = "success" ]; then
+            echo "### Conformance case bodies: no registered case changed shape under an unchanged id." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::The pinned case-body check did not pass (outcome: ${{ steps.bodies.outcome }}). Either a case this SDK registers was re-tightened under the same id, or the check could not run. Read its step log — it names the case."
+          fi
+
           case "${{ steps.align.outcome }}" in
             success)
               {

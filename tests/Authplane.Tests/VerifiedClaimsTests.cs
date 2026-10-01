@@ -76,6 +76,7 @@ public sealed class VerifiedClaimsTests
         Assert.Equal(string.Empty, Build(raw: rawWithString).Act);
     }
 
+#pragma warning disable CS0618 // Obsolete: MayAct kept until the next minor; behaviour still pinned
     [Fact]
     public void MayAct_ReturnsMayActSubFromRaw_WhenStructured()
     {
@@ -89,6 +90,7 @@ public sealed class VerifiedClaimsTests
     {
         Assert.Equal(string.Empty, Build().MayAct);
     }
+#pragma warning restore CS0618
 
     [Fact]
     public void HasClaim_KeyOnly_ReturnsTrueIfKeyPresent()

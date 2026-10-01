@@ -81,19 +81,10 @@ jobs:
         # Pinned by SHA (was: clone of the latest default branch), from the same
         # tracked `.conformance-catalog-ref` that ci.yml reads. A release must
         # verify against the catalog the PRs were verified against, or a case
-        # added between merge and tag could fail the release run.
-        shell: bash
-        run: |
-          CONFORMANCE_CATALOG_REF="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
-          # Guard the pin before fetching: a non-SHA value would silently
-          # un-pin the release to whatever ref resolves at fetch time.
-          grep -Eq '^[0-9a-f]{40}$' <<<"$CONFORMANCE_CATALOG_REF" \
-            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
-          git init -q "$RUNNER_TEMP/conformance"
-          git -C "$RUNNER_TEMP/conformance" \
-            fetch --depth=1 https://github.com/AuthPlane/conformance.git "$CONFORMANCE_CATALOG_REF" \
-            || { echo "::error::Pinned conformance catalog ref $CONFORMANCE_CATALOG_REF is unreachable"; exit 1; }
-          git -C "$RUNNER_TEMP/conformance" checkout -q FETCH_HEAD
+        # added between merge and tag could fail the release run. Shared with
+        # ci.yml and the drift workflow so the pin guard cannot be tightened in
+        # one and not the others.
+        run: .github/scripts/fetch-conformance-catalog.sh
 
       - name: Setup .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1

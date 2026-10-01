@@ -333,12 +333,20 @@ public sealed class MetadataValidationTests : IDisposable
     }
 
     [Fact]
-    [Conformance("rfc8414-jwks-uri-rotation-must-reconfigure-jwks-cache")]
+    [Conformance("rfc8414-jwks-uri-rotation-must-reconfigure-jwks-cache",
+        Level = "partial",
+        Gaps = "stimulus.operation,setup.new_metadata,setup.rotation_sequence,setup.metadata_refresh_interval,expected.outcome,expected.bound,expected.side_effect",
+        Note = "Exercises the stimulus constraint only: the kid-miss path is driven through public VerifyAsync with no force-refresh argument, test hook or reflection. The re-fetch itself is not observed — the fixture serves one static empty JWKS and counts nothing, and the only assertion is a rejection. jwks_uri is never rotated and metadata is never re-read, so the rebind to new_metadata.jwks_uri is not shown either; a single VerifyAsync also does not span the metadata refresh interval the case's stimulus calls for. The rebind exists in AuthplaneClient (the JWKS fetcher reads jwks_uri from the metadata cache on every refresh) but no test drives it through the public API")]
     public async Task JwksCache_RefreshesOnKidMiss()
     {
-        // AuthplaneClient.GetSigningKeyAsync fetches fresh JWKS when a kid is not
-        // in the cache. This is a partial rotation mechanism (JWKS content refreshes
-        // but the URI itself is not re-discovered).
+        // A kid miss drives AuthplaneClient.GetSigningKeyAsync through ordinary
+        // VerifyAsync traffic, with nothing forced from the outside. The test
+        // observes only the rejection: the fixture serves one static empty JWKS
+        // and counts no requests, so the re-fetch is exercised but not asserted.
+        // `jwks_uri` never changes either, so the rotation half of the catalog
+        // case — metadata re-read after the refresh interval, JWKS fetched from
+        // the new `jwks_uri` — is not demonstrated here. The [Conformance]
+        // attribute above records both gaps.
         _metadataBody = $"{{\"issuer\":\"{_issuer}\",\"jwks_uri\":\"{_issuer}/.well-known/jwks.json\"}}";
 
         var resource = await AuthplaneResource.CreateAsync(
@@ -358,7 +366,15 @@ public sealed class MetadataValidationTests : IDisposable
             },
             payload: new System.Collections.Generic.Dictionary<string, object>());
 
-        await Assert.ThrowsAsync<InvalidSignatureException>(() => resource.VerifyAsync(token));
+        // Type alone proves nothing here: AuthplaneResource funnels every
+        // unhandled exception into InvalidSignatureException, so a JWKS fetch
+        // failure or a transport error would satisfy a type-only assertion just
+        // as well. The message is what pins the kid-miss path the declaration
+        // above claims this test drives — without it, a reordering makes that
+        // claim silently false while the test stays green.
+        var ex = await Assert.ThrowsAsync<InvalidSignatureException>(
+            () => resource.VerifyAsync(token));
+        Assert.Contains("not found in JWKS", ex.Message, StringComparison.Ordinal);
         await resource.DisposeAsync();
     }
 

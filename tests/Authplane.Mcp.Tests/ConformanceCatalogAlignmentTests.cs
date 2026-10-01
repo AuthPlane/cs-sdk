@@ -33,4 +33,34 @@ public sealed class ConformanceCatalogAlignmentTests
         ConformanceCatalogAlignment.AssertNoUnknownCaseIds(
             typeof(ConformanceCatalogAlignmentTests).Assembly);
     }
+
+    /// <summary>
+    /// Emits the [Conformance] marker scan of this assembly for the scheduled case-body drift
+    /// check, when the workflow asks for it.
+    /// </summary>
+    /// <remarks>
+    /// The scan is empty today, for the same reason the assertion above has nothing to check: this
+    /// assembly declares no markers. It is emitted anyway so the reader sees a scan that ran and
+    /// found nothing rather than a scan that never ran, and so markers added here later are
+    /// watched by the drift check without anyone having to remember to widen it.
+    ///
+    /// Emptiness is therefore not asserted here. The reader requires the union across assemblies
+    /// to be non-empty, which is the guard that matters: an empty id list makes the drift check
+    /// vacuously green.
+    /// </remarks>
+    [Fact]
+    public void ConformanceMarkerScan_IsWellFormedAndEmittedWhenRequested()
+    {
+        var markers = ConformanceCatalogAlignment.ScanConformanceMarkers(
+            typeof(ConformanceCatalogAlignmentTests).Assembly);
+
+        Assert.All(markers, marker =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(marker.CaseId));
+            Assert.False(string.IsNullOrWhiteSpace(marker.DeclaredBy));
+        });
+
+        ConformanceMarkerScanWriter.WriteIfRequested(
+            typeof(ConformanceCatalogAlignmentTests).Assembly);
+    }
 }
