@@ -34,7 +34,7 @@
 
   <ItemGroup>
     <!-- MCP C# SDK - HTTP server and hosting extensions -->
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.0.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.1" />
 
     <!-- Core Authplane SDK project (local sibling repo).
          Adjust/remove this when Authplane is published as a NuGet package. -->
